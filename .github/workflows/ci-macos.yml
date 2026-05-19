@@ -315,3 +315,14 @@ jobs:
           "$MCPP" build
           "$MCPP" --version
           echo ":: Self-host smoke PASS"
+
+      - name: Fresh user experience (xlings install mcpp → new → run)
+        continue-on-error: true
+        run: |
+          # Test real user flow with xlings-distributed mcpp.
+          # May fail if xlings mcpp version lacks recent fixes.
+          TMP=$(mktemp -d)
+          cd "$TMP"
+          mcpp new hello
+          cd hello
+          mcpp run

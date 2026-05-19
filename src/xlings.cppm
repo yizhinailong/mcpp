@@ -428,18 +428,13 @@ std::filesystem::path sandbox_init_marker(const Env& env) {
 std::string build_command_prefix(const Env& env) {
     auto xvmBin = paths::sandbox_bin(env).string();
 #if defined(_WIN32)
-    // Windows: set environment variables via the process environment
-    // (cmd.exe `set` in compound &&-chains is unreliable) then invoke
-    // xlings directly. _putenv_s is inherited by popen/system child.
     _putenv_s("XLINGS_HOME", env.home.string().c_str());
     _putenv_s("XLINGS_PROJECT_DIR",
               env.projectDir.empty() ? "" : env.projectDir.string().c_str());
-    // Prepend sandbox bin to PATH
     {
         std::string newPath = xvmBin + ";" + (std::getenv("PATH") ? std::getenv("PATH") : "");
         _putenv_s("PATH", newPath.c_str());
     }
-    // Return raw path — no quoting to avoid cmd.exe double-quote parsing issues
     return env.binary.string();
 #else
     if (env.projectDir.empty()) {
@@ -666,9 +661,17 @@ int install_with_progress(const Env& env, std::string_view target,
 #if defined(_WIN32)
     _putenv_s("XLINGS_HOME", env.home.string().c_str());
     _putenv_s("XLINGS_PROJECT_DIR", "");
-    // Use raw path (no quoting) to avoid cmd.exe double-quote parsing issues.
-    // Wrap only the JSON arg in single-escaped quotes for the C runtime.
-    auto cmd = std::format("{} interface install_packages --args {} 2>nul",
+    std::error_code ec_mkdir;
+    std::filesystem::create_directories(env.home, ec_mkdir);
+    // Use direct `install` command instead of `interface install_packages`
+    // on Windows. The NDJSON interface may have issues with large packages
+    // where the extraction subprocess doesn't respect XLINGS_HOME.
+    auto directCmd = std::format("{} install {} -y",
+        env.binary.string(), target);
+    int directRc = std::system(directCmd.c_str());
+    if (directRc == 0) return 0;
+    // Fallback to interface path if direct install fails
+    auto cmd = std::format("{} interface install_packages --args {}",
         env.binary.string(),
         shq(argsJson));
 #else

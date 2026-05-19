@@ -605,28 +605,37 @@ Fetcher::resolve_xpkg_path(std::string_view target,
     };
 
     auto resolve = [&]() -> std::expected<XpkgPayload, CallError> {
-        // xlings may install the package into its global home rather than
-        // the mcpp sandbox. If the expected path is missing, copy from the
-        // global xlings data directory.
-        if (!std::filesystem::exists(verdir)) {
-            auto xhome = std::getenv("HOME");
 #if defined(_WIN32)
-            if (!xhome) xhome = std::getenv("USERPROFILE");
-#endif
+        // Workaround: xlings on Windows may extract large packages (e.g. LLVM)
+        // into its global data dir instead of the mcpp sandbox, because the
+        // extraction subprocess doesn't inherit XLINGS_HOME. Detect this and
+        // copy the payload into the sandbox so mcpp remains self-contained.
+        if (!std::filesystem::exists(verdir)) {
+            // Try xlings' own data dir (where `xlings self install` placed it)
+            auto xhome = std::getenv("USERPROFILE");
+            if (!xhome) xhome = std::getenv("HOME");
             if (xhome) {
-                auto globalDir = std::filesystem::path(xhome)
-                    / ".xlings" / "data" / "xpkgs"
-                    / verdir.parent_path().filename()
-                    / verdir.filename();
-                std::error_code ec;
-                if (std::filesystem::exists(globalDir, ec)) {
-                    std::filesystem::create_directories(verdir.parent_path(), ec);
-                    std::filesystem::copy(globalDir, verdir,
-                        std::filesystem::copy_options::recursive
-                        | std::filesystem::copy_options::overwrite_existing, ec);
+                // xlings stores xpkgs at <home>/.xlings/data/xpkgs/ or
+                // <home>/.xlings/subos/default/data/xpkgs/
+                auto pkgDir = verdir.parent_path().filename().string();
+                auto verName = verdir.filename().string();
+                std::filesystem::path candidates[] = {
+                    std::filesystem::path(xhome) / ".xlings" / "data" / "xpkgs" / pkgDir / verName,
+                    std::filesystem::path(xhome) / ".xlings" / "subos" / "default" / "data" / "xpkgs" / pkgDir / verName,
+                };
+                for (auto& src : candidates) {
+                    std::error_code ec;
+                    if (std::filesystem::exists(src, ec) && std::filesystem::is_directory(src, ec)) {
+                        std::filesystem::create_directories(verdir.parent_path(), ec);
+                        std::filesystem::copy(src, verdir,
+                            std::filesystem::copy_options::recursive
+                            | std::filesystem::copy_options::overwrite_existing, ec);
+                        if (!ec) break;
+                    }
                 }
             }
         }
+#endif
         if (!std::filesystem::exists(verdir)) {
             return std::unexpected(CallError{
                 std::format("xpkg payload missing: {}", verdir.string())});
