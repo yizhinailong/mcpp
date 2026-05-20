@@ -262,7 +262,10 @@ probe_sysroot(const std::filesystem::path& compilerBin,
         auto s = trim_line(*r);
         if (!s.empty() && std::filesystem::exists(s)) return s;
     }
-    // macOS fallback: use xcrun to discover the SDK path
+    // macOS fallback: use xcrun to discover the SDK path.
+    // The sysroot is used for regular compilation flags (flags.cppm) but
+    // skipped for std module precompilation on macOS (stdmod.cppm) to
+    // avoid breaking SDK internal header dependencies.
     if (auto sdk = mcpp::platform::macos::sdk_path())
         return *sdk;
     return {};

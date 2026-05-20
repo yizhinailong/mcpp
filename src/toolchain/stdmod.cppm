@@ -92,8 +92,26 @@ std::expected<StdModule, StdModError> ensure_built(
                   : mcpp::toolchain::gcc::std_bmi_path(sm.cacheDir);
     sm.objectPath = sm.cacheDir / "std.o";
 
+    // Build sysroot + include flags for std module precompilation.
+    // On macOS, xlings LLVM's clang++.cfg contains hardcoded --sysroot and
+    // -isystem paths from the original install location. When the LLVM package
+    // is copied to mcpp's sandbox, these cfg paths become stale (still point
+    // to the original xlings directory). We override both:
+    //   --sysroot   → current active SDK (from xcrun)
+    //   --no-default-config  → ignore stale cfg entirely
+    //   -isystem    → correct libc++ headers in the sandbox copy
     std::string sysroot_flag;
-    if (!tc.sysroot.empty()) {
+    bool is_macos = tc.targetTriple.find("apple") != std::string::npos
+                 || tc.targetTriple.find("darwin") != std::string::npos;
+    if (is_macos && is_clang(tc)) {
+        // Ignore the stale clang++.cfg and provide correct flags directly.
+        auto llvmRoot = tc.binaryPath.parent_path().parent_path();
+        auto libcxxInclude = llvmRoot / "include" / "c++" / "v1";
+        sysroot_flag = " --no-default-config";
+        sysroot_flag += std::format(" -isystem'{}'", libcxxInclude.string());
+        if (auto sdk = mcpp::platform::macos::sdk_path())
+            sysroot_flag += std::format(" --sysroot='{}'", sdk->string());
+    } else if (!tc.sysroot.empty()) {
         sysroot_flag = std::format(" --sysroot='{}'", tc.sysroot.string());
     }
 
