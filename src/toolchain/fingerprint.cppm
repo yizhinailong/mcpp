@@ -18,7 +18,7 @@ import mcpp.toolchain.detect;
 
 export namespace mcpp::toolchain {
 
-inline constexpr std::string_view MCPP_VERSION = "0.0.24";
+inline constexpr std::string_view MCPP_VERSION = "0.0.25";
 
 struct FingerprintInputs {
     Toolchain                       toolchain;
