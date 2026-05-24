@@ -1,9 +1,11 @@
-name: ci
+name: ci-linux
 
-# Self-host CI: mcpp builds mcpp. The bootstrap mcpp comes from
-# `xlings install mcpp` (xim:mcpp in the xlings package index), so
-# this workflow no longer depends on a previous-release tarball — the
+# Self-host CI on Linux: mcpp builds mcpp. The bootstrap mcpp comes from
+# `xlings install mcpp` (xim:mcpp in the xlings package index), so this
+# workflow no longer depends on a previous-release tarball — the
 # chicken-and-egg now lives upstream in the xlings index.
+#
+# Paired workflows: ci-macos.yml, ci-windows.yml.
 
 on:
   push:
@@ -104,6 +106,12 @@ jobs:
           "$MCPP_FRESH" test
 
       - name: E2E suite
+        # Step-level guard: a single hung test (historically 10_env_command.sh
+        # on slow xlings/network) used to eat the full 60-min job budget.
+        # Cap the suite at 25 min so a hang fails fast and we still have room
+        # for the downstream toolchain steps. Per-test 600s timeout lives in
+        # tests/e2e/run_all.sh and identifies WHICH test hung.
+        timeout-minutes: 25
         run: |
           # Point the e2e runner at the freshly-built binary, not the
           # bootstrap one. Tests cd into mktemp -d, so $MCPP must be
