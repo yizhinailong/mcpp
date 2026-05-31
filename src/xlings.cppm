@@ -194,6 +194,10 @@ using BootstrapProgressCallback = std::function<void(const BootstrapProgress&)>;
 int install_with_progress(const Env& env, std::string_view target,
                           const BootstrapProgressCallback& cb);
 
+// Run direct `xlings install <target> -y`.
+// Used as a fallback when the NDJSON interface install path fails.
+int install_direct(const Env& env, std::string_view target, bool quiet = false);
+
 // ─── Sandbox lifecycle ──────────────────────────────────────────────
 
 // Write .xlings.json seed file.
@@ -237,6 +241,18 @@ void ensure_ninja(const Env& env, bool quiet,
 // Returns true if index is present and fresh, false otherwise.
 bool is_index_fresh(const Env& env, std::int64_t ttlSeconds);
 
+// Check whether xlings' official xim index data exists and is fresh.
+// This is separate from mcpp's default mcpplibs index because xlings
+// toolchains live in xim-pkgindex, while modular libraries live in mcpplibs.
+bool is_official_index_fresh(const Env& env, std::int64_t ttlSeconds);
+
+// Check whether a specific package file exists in xlings' official xim index
+// and the index is fresh. This catches restored CI caches that have an index
+// directory and marker but predate a package added later.
+bool is_official_package_index_fresh(const Env& env,
+                                     std::string_view packageName,
+                                     std::int64_t ttlSeconds);
+
 // Run `xlings update` to refresh all index repos. Streams output to stdout.
 // Returns the xlings exit code.
 int update_index(const Env& env, bool quiet = false);
@@ -245,6 +261,15 @@ int update_index(const Env& env, bool quiet = false);
 // the index is missing or older than ttlSeconds. Idempotent and quiet
 // when no update is needed.
 void ensure_index_fresh(const Env& env, std::int64_t ttlSeconds, bool quiet = false);
+
+// Ensure xlings' official xim index is present and fresh.
+void ensure_official_index_fresh(const Env& env, std::int64_t ttlSeconds, bool quiet = false);
+
+// Ensure a specific package file exists in xlings' official xim index.
+void ensure_official_package_index_fresh(const Env& env,
+                                         std::string_view packageName,
+                                         std::int64_t ttlSeconds,
+                                         bool quiet = false);
 
 // ─── run_capture utility ────────────────────────────────────────────
 
@@ -268,6 +293,90 @@ void print_status(std::string_view verb, std::string_view msg) {
     } else {
         std::println("{}{} {}", std::string(W - verb.size(), ' '), verb, msg);
     }
+}
+
+std::filesystem::path default_index_dir(const Env& env) {
+    return paths::index_data(env) / "mcpplibs";
+}
+
+std::filesystem::path official_index_dir(const Env& env) {
+    return paths::index_data(env) / "xim-pkgindex";
+}
+
+std::filesystem::path index_pkgs_dir(const std::filesystem::path& indexDir) {
+    return indexDir / "pkgs";
+}
+
+std::filesystem::path index_refresh_marker(const std::filesystem::path& indexDir) {
+    return indexDir / ".mcpp-index-updated";
+}
+
+std::filesystem::path official_package_file(const Env& env, std::string_view packageName) {
+    if (packageName.empty()) return {};
+    std::string name(packageName);
+    return official_index_dir(env) / "pkgs" / std::string(1, name[0]) / (name + ".lua");
+}
+
+std::string json_escaped_path_probe(std::filesystem::path path) {
+    auto value = path.string();
+    std::string escaped;
+    escaped.reserve(value.size() * 2);
+    for (char c : value) {
+        if (c == '\\') escaped += "\\\\";
+        else escaped.push_back(c);
+    }
+    return escaped;
+}
+
+bool official_index_cache_matches_package_file(const Env& env,
+                                               std::string_view packageName) {
+    auto cache = official_index_dir(env) / ".xlings-index-cache.json";
+    if (!std::filesystem::exists(cache)) return true;
+
+    auto pkg = official_package_file(env, packageName);
+    if (pkg.empty()) return false;
+
+    std::ifstream is(cache);
+    if (!is) return false;
+    std::string body((std::istreambuf_iterator<char>(is)), {});
+    auto rawPath = pkg.string();
+    return body.find(rawPath) != std::string::npos
+        || body.find(json_escaped_path_probe(pkg)) != std::string::npos;
+}
+
+void mark_index_refreshed(const std::filesystem::path& indexDir) {
+    if (!std::filesystem::exists(index_pkgs_dir(indexDir))) return;
+    std::error_code ec;
+    std::filesystem::create_directories(indexDir, ec);
+    auto marker = index_refresh_marker(indexDir);
+    {
+        std::ofstream os(marker, std::ios::trunc);
+        if (!os) return;
+        os << "ok\n";
+    }
+    std::filesystem::last_write_time(
+        marker, std::filesystem::file_time_type::clock::now(), ec);
+}
+
+void mark_known_indexes_refreshed(const Env& env) {
+    if (!env.projectDir.empty()) return;
+    mark_index_refreshed(default_index_dir(env));
+    mark_index_refreshed(official_index_dir(env));
+}
+
+bool is_index_dir_fresh(const std::filesystem::path& indexDir, std::int64_t ttlSeconds) {
+    std::error_code ec;
+    if (!std::filesystem::exists(index_pkgs_dir(indexDir))) return false;
+
+    auto marker = index_refresh_marker(indexDir);
+    if (!std::filesystem::exists(marker)) return false;
+
+    auto newest = std::filesystem::last_write_time(marker, ec);
+    if (ec) return false;
+
+    auto now = std::filesystem::file_time_type::clock::now();
+    auto age = std::chrono::duration_cast<std::chrono::seconds>(now - newest);
+    return age.count() < ttlSeconds;
 }
 
 void write_file(const std::filesystem::path& p, std::string_view content) {
@@ -807,6 +916,21 @@ int install_with_progress(const Env& env, std::string_view target,
     return (resultExitCode != -1) ? resultExitCode : closeRc;
 }
 
+int install_direct(const Env& env, std::string_view target, bool quiet) {
+    auto cmd = build_command_prefix(env)
+        + std::format(" install {} -y", shq(target));
+    if (quiet) {
+        cmd += " ";
+        cmd += std::string(mcpp::platform::shell::silent_redirect);
+    }
+    if constexpr (mcpp::platform::is_windows) {
+        cmd += " <NUL";
+    } else {
+        cmd += " </dev/null";
+    }
+    return mcpp::platform::process::extract_exit_code(std::system(cmd.c_str()));
+}
+
 // ─── Sandbox lifecycle ──────────────────────────────────────────────
 
 void seed_xlings_json(const Env& env,
@@ -931,32 +1055,55 @@ void ensure_ninja(const Env& env, bool quiet,
 // ─── Index freshness ────────────────────────────────────────────────
 
 bool is_index_fresh(const Env& env, std::int64_t ttlSeconds) {
-    std::error_code ec;
-    auto pkgsDir = paths::index_data(env) / "mcpplibs" / "pkgs";
-    if (!std::filesystem::exists(pkgsDir)) return false;
+    return is_index_dir_fresh(default_index_dir(env), ttlSeconds);
+}
 
-    auto newest = std::filesystem::last_write_time(pkgsDir, ec);
-    if (ec) return false;
+bool is_official_index_fresh(const Env& env, std::int64_t ttlSeconds) {
+    return is_index_dir_fresh(official_index_dir(env), ttlSeconds);
+}
 
-    // Check TTL
-    auto now = std::filesystem::file_time_type::clock::now();
-    auto age = std::chrono::duration_cast<std::chrono::seconds>(now - newest);
-    return age.count() < ttlSeconds;
+bool is_official_package_index_fresh(const Env& env,
+                                     std::string_view packageName,
+                                     std::int64_t ttlSeconds) {
+    if (!is_official_index_fresh(env, ttlSeconds)) return false;
+    auto pkg = official_package_file(env, packageName);
+    return !pkg.empty()
+        && std::filesystem::exists(pkg)
+        && official_index_cache_matches_package_file(env, packageName);
 }
 
 int update_index(const Env& env, bool quiet) {
     std::string cmd = build_command_prefix(env) + " update 2>&1";
-    return mcpp::platform::process::run_streaming(cmd,
+    int rc = mcpp::platform::process::run_streaming(cmd,
         [quiet](std::string_view line) {
             if (!quiet) std::println("{}", line);
         });
+    if (rc == 0) mark_known_indexes_refreshed(env);
+    return rc;
 }
 
 void ensure_index_fresh(const Env& env, std::int64_t ttlSeconds, bool quiet) {
     if (is_index_fresh(env, ttlSeconds)) return;
     if (!quiet)
         print_status("Updating", "package index (auto-refresh)");
-    update_index(env, quiet);
+    update_index(env, /*quiet=*/true);
+}
+
+void ensure_official_index_fresh(const Env& env, std::int64_t ttlSeconds, bool quiet) {
+    if (is_official_index_fresh(env, ttlSeconds)) return;
+    if (!quiet)
+        print_status("Updating", "package index (auto-refresh)");
+    update_index(env, /*quiet=*/true);
+}
+
+void ensure_official_package_index_fresh(const Env& env,
+                                         std::string_view packageName,
+                                         std::int64_t ttlSeconds,
+                                         bool quiet) {
+    if (is_official_package_index_fresh(env, packageName, ttlSeconds)) return;
+    if (!quiet)
+        print_status("Updating", "package index (auto-refresh)");
+    update_index(env, /*quiet=*/true);
 }
 
 } // namespace mcpp::xlings
