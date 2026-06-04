@@ -87,10 +87,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.xlings
-          key: xlings-${{ runner.os }}-release-${{ hashFiles('.xlings.json') }}
+          key: xlings-${{ runner.os }}-release-xl0448-${{ hashFiles('.xlings.json') }}
           restore-keys: |
-            xlings-${{ runner.os }}-release-
-            xlings-${{ runner.os }}-
+            xlings-${{ runner.os }}-release-xl0448-
 
       - name: Bootstrap mcpp via xlings
         env:
@@ -98,12 +97,12 @@ jobs:
           # Pin xlings to a known-good version. The upstream install
           # script always grabs `latest` (no version override), so we
           # download + self-install manually to avoid broken releases.
-          XLINGS_VERSION: '0.4.30'
+          XLINGS_VERSION: '0.4.48'
         run: |
           if [ ! -x "$HOME/.xlings/subos/default/bin/xlings" ]; then
             tarball="xlings-${XLINGS_VERSION}-linux-x86_64.tar.gz"
             curl -fsSL -o "/tmp/${tarball}" \
-              "https://github.com/d2learn/xlings/releases/download/v${XLINGS_VERSION}/${tarball}"
+              "https://github.com/openxlings/xlings/releases/download/v${XLINGS_VERSION}/${tarball}"
             tar -xzf "/tmp/${tarball}" -C /tmp
             "/tmp/xlings-${XLINGS_VERSION}-linux-x86_64/subos/default/bin/xlings" self install
           fi
@@ -291,21 +290,20 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.xlings
-          key: xlings-macos15-release-${{ hashFiles('.xlings.json') }}
+          key: xlings-macos15-release-xl0448-${{ hashFiles('.xlings.json') }}
           restore-keys: |
-            xlings-macos15-release-
-            xlings-macos15-arm64-
+            xlings-macos15-release-xl0448-
 
       - name: Bootstrap mcpp via xlings
         env:
           XLINGS_NON_INTERACTIVE: '1'
-          XLINGS_VERSION: '0.4.30'
+          XLINGS_VERSION: '0.4.48'
         run: |
           if [ ! -x "$HOME/.xlings/subos/default/bin/xlings" ]; then
             WORK=$(mktemp -d)
             tarball="xlings-${XLINGS_VERSION}-macosx-arm64.tar.gz"
             curl -fsSL -o "${WORK}/${tarball}" \
-              "https://github.com/d2learn/xlings/releases/download/v${XLINGS_VERSION}/${tarball}"
+              "https://github.com/openxlings/xlings/releases/download/v${XLINGS_VERSION}/${tarball}"
             tar -xzf "${WORK}/${tarball}" -C "${WORK}"
             "${WORK}/xlings-${XLINGS_VERSION}-macosx-arm64/subos/default/bin/xlings" self install
           fi
@@ -441,21 +439,20 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~\.xlings
-          key: xlings-${{ runner.os }}-release-${{ hashFiles('.xlings.json') }}
+          key: xlings-${{ runner.os }}-release-xl0448-${{ hashFiles('.xlings.json') }}
           restore-keys: |
-            xlings-${{ runner.os }}-release-
-            xlings-${{ runner.os }}-
+            xlings-${{ runner.os }}-release-xl0448-
 
       - name: Bootstrap mcpp via xlings
         shell: bash
         env:
           XLINGS_NON_INTERACTIVE: '1'
-          XLINGS_VERSION: '0.4.30'
+          XLINGS_VERSION: '0.4.48'
         run: |
           WORK=$(mktemp -d)
           zipfile="xlings-${XLINGS_VERSION}-windows-x86_64.zip"
           curl -fsSL -o "${WORK}/${zipfile}" \
-            "https://github.com/d2learn/xlings/releases/download/v${XLINGS_VERSION}/${zipfile}"
+            "https://github.com/openxlings/xlings/releases/download/v${XLINGS_VERSION}/${zipfile}"
           cd "${WORK}"
           unzip -q "${zipfile}"
           "$WORK/xlings-${XLINGS_VERSION}-windows-x86_64/subos/default/bin/xlings.exe" self install
