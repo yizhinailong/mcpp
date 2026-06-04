@@ -1222,6 +1222,7 @@ struct BuildOverrides {
     std::string package_filter;      // -p <name>: only build this workspace member
     std::string profile;             // --profile <name> (default "release")
     std::string features;            // --features a,b,c (root package activation)
+    bool        strict = false;      // --strict: schema warnings become errors
 };
 
 // `prepare_build` builds the BuildContext for any verb that compiles.
@@ -1384,13 +1385,33 @@ prepare_build(bool print_fingerprint,
         std::string pname = overrides.profile.empty() ? "release" : overrides.profile;
         mcpp::manifest::Profile pr;
         if (pname == "dev" || pname == "debug") { pr.optLevel = "0"; pr.debug = true; }
-        else if (pname == "dist")               { pr.optLevel = "3"; pr.lto = true; pr.strip = true; }
+        else if (pname == "dist")               { pr.optLevel = "3"; pr.strip = true; }
+        // (built-in dist intentionally leaves lto off: several packaged gcc
+        //  payloads ship without the LTO plugin; enable via [profile.dist].)
         else                                    { pr.optLevel = "2"; } // release
         if (auto it = m->profiles.find(pname); it != m->profiles.end()) pr = it->second;
         m->buildConfig.optLevel = pr.optLevel;
         m->buildConfig.debug    = pr.debug;
         m->buildConfig.lto      = pr.lto;
         m->buildConfig.strip    = pr.strip;
+        m->buildConfig.cflags.insert(m->buildConfig.cflags.end(),
+                                     pr.cflags.begin(), pr.cflags.end());
+        m->buildConfig.cxxflags.insert(m->buildConfig.cxxflags.end(),
+                                       pr.cxxflags.begin(), pr.cxxflags.end());
+        m->buildConfig.ldflags.insert(m->buildConfig.ldflags.end(),
+                                      pr.ldflags.begin(), pr.ldflags.end());
+    }
+
+    // [package] platforms — fixed vocabulary owned by mcpp (it owns the
+    // target/triple system). Unknown values: warning, or error under --strict.
+    for (auto& pf : m->package.platforms) {
+        if (pf != "linux" && pf != "macos" && pf != "windows") {
+            auto msg = std::format(
+                "[package] platforms contains unknown platform '{}' "
+                "(expected: linux | macos | windows)", pf);
+            if (overrides.strict) return std::unexpected(msg);
+            std::println(stderr, "warning: {}", msg);
+        }
     }
 
     auto tcSpec = m->toolchain.for_platform(kCurrentPlatform);
@@ -3015,6 +3036,24 @@ prepare_build(bool print_fingerprint,
                 if (c == std::string::npos) break;
                 p = c + 1;
             }
+            // Strict schema check: a requested feature must exist in the
+            // target package's [features] table when one is declared (a
+            // package with no [features] accepts any request — pure-define
+            // usage). Covers backend= sugar (feature backend-<x>) too.
+            auto unknown_requested = [](const mcpp::manifest::Manifest& pm,
+                                        const std::vector<std::string>& requested)
+                -> std::optional<std::string> {
+                if (pm.featuresMap.empty()) return std::nullopt;
+                for (auto& f : requested)
+                    if (!pm.featuresMap.contains(f)) return f;
+                return std::nullopt;
+            };
+            if (auto bad = unknown_requested(packages[0].manifest, rootReq)) {
+                auto msg = std::format(
+                    "--features requests '{}' which [features] does not declare", *bad);
+                if (overrides.strict) return std::unexpected(msg);
+                std::println(stderr, "warning: {}", msg);
+            }
             apply(packages[0], rootReq);
         }
         for (std::size_t i = 1; i < packages.size(); ++i) {
@@ -3022,6 +3061,16 @@ prepare_build(bool print_fingerprint,
             std::vector<std::string> req;
             for (auto& [dname, dspec] : m->dependencies) {
                 if (dname == pname || dspec.shortName == pname) { req = dspec.features; break; }
+            }
+            if (!req.empty() && !packages[i].manifest.featuresMap.empty()) {
+                for (auto& f : req) {
+                    if (packages[i].manifest.featuresMap.contains(f)) continue;
+                    auto msg = std::format(
+                        "dependency '{}' does not declare requested feature '{}' "
+                        "in its [features] table", pname, f);
+                    if (overrides.strict) return std::unexpected(msg);
+                    std::println(stderr, "warning: {}", msg);
+                }
             }
             if (!req.empty() || packages[i].manifest.featuresMap.contains("default"))
                 apply(packages[i], req);
@@ -3710,10 +3759,16 @@ int cmd_build(const mcpplibs::cmdline::ParsedArgs& parsed) {
     if (auto p = parsed.value("package")) ov.package_filter = *p;
     if (auto pr = parsed.value("profile")) ov.profile = *pr;
     if (auto fs = parsed.value("features")) ov.features = *fs;
+    ov.strict = parsed.is_flag_set("strict");
     ov.force_static = parsed.is_flag_set("static");
 
-    // P0: try fast-path if inputs haven't changed.
-    if (!print_fp && ov.target_triple.empty() && !ov.force_static) {
+    // P0: try fast-path if inputs haven't changed. Any resolution-affecting
+    // override (--profile/--features/--strict, like --target/--static) must
+    // bypass it: the cached build.ninja was generated without them, so taking
+    // the fast path would silently ignore the flags.
+    if (!print_fp && ov.target_triple.empty() && !ov.force_static
+        && ov.profile.empty() && ov.features.empty() && !ov.strict
+        && ov.package_filter.empty()) {
         auto root = find_manifest_root(std::filesystem::current_path());
         if (root) {
             if (auto rc = try_fast_build(*root, verbose, no_cache)) {
@@ -5728,6 +5783,8 @@ int run(int argc, char** argv) {
                 .help("Build profile: release (default) | dev | dist | <[profile.*] name>"))
             .option(cl::Option("features").takes_value().value_name("LIST")
                 .help("Activate root-package features (comma-separated)"))
+            .option(cl::Option("strict")
+                .help("Treat manifest schema warnings (unknown feature/platform) as errors"))
             .action(wrap_rc(cmd_build)))
         .subcommand(cl::App("run")
             .description("Build + run a binary target (after `--`, args are passed to it)")
