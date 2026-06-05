@@ -6,6 +6,9 @@
 //
 // See .agents/docs/2026-05-12-compile-commands-design.md.
 
+module;
+#include <cstdlib>
+
 export module mcpp.build.flags;
 
 import std;
@@ -29,6 +32,15 @@ struct CompileFlags {
     std::string bFlag;                // -B<binutils> (for ninja ldflags)
     bool staticStdlib = true;
     std::string linkage;  // "static" or ""
+    // macOS per-unit C++ stdlib link (appended via unit_ldflags):
+    // distributable targets get the static LLVM libc++ (portable across
+    // macOS versions), TestBinary targets get the system -lc++ — they
+    // only ever run on the build host, and statically linked libc++
+    // SIGABRTs during static destruction unless the entry point guards
+    // with _Exit (mcpp/xlings do; gtest main does not). Empty on other
+    // platforms (stdlib handled by their existing paths).
+    std::string ldStdlibDefault;
+    std::string ldStdlibTest;
 };
 
 CompileFlags compute_flags(const BuildPlan& plan);
@@ -86,6 +98,18 @@ CompileFlags compute_flags(const BuildPlan& plan) {
     // any new branching added to this function.
     auto caps = mcpp::toolchain::capabilities_for(plan.toolchain);
 
+    // macOS minimum supported OS version for produced binaries.
+    // Precedence: MACOSX_DEPLOYMENT_TARGET env (explicit per-invocation
+    // override, the convention cargo/rustc/cc honor) > the manifest's
+    // [build] macos_deployment_target (project default, SwiftPM-style) >
+    // empty (toolchain/SDK default).
+    std::string macosDeploymentTarget;
+    if (const char* dt = std::getenv("MACOSX_DEPLOYMENT_TARGET"); dt && *dt) {
+        macosDeploymentTarget = dt;
+    } else {
+        macosDeploymentTarget = plan.manifest.buildConfig.macosDeploymentTarget;
+    }
+
     f.cxxBinary = plan.toolchain.binaryPath;
     f.ccBinary = mcpp::toolchain::derive_c_compiler(plan.toolchain);
 
@@ -120,6 +144,9 @@ CompileFlags compute_flags(const BuildPlan& plan) {
     std::string link_toolchain_flags;
     bool isClangWithCfg = false;
     std::filesystem::path cfgPath;
+    // LLVM root of a clang-with-cfg toolchain — used by the macOS link
+    // path below to locate libc++.a/libc++abi.a for staticStdlib.
+    std::filesystem::path llvmRootForStdlib;
     if (mcpp::toolchain::is_clang(plan.toolchain)) {
         cfgPath = plan.toolchain.binaryPath.parent_path()
                   / (plan.toolchain.binaryPath.stem().string() + ".cfg");
@@ -131,6 +158,19 @@ CompileFlags compute_flags(const BuildPlan& plan) {
         auto llvmRoot = plan.toolchain.binaryPath.parent_path().parent_path();
         auto libcxxInclude = llvmRoot / "include" / "c++" / "v1";
         compile_toolchain_flags = " --no-default-config -nostdinc++";
+        // macOS deployment target: make the resolved value explicit on
+        // the command line so (a) the ninja commands don't depend on env
+        // propagation and (b) the value participates in the BMI
+        // fingerprint via canonical flags — mixing targets in one sandbox
+        // otherwise reuses a std.pcm built for a different
+        // arm64-apple-macosxNN triple and dies with a config mismatch
+        // (observed on macos CI). The link side is added to f.ld below
+        // (the macOS link path doesn't consume link_toolchain_flags).
+        if (mcpp::platform::is_macos && !macosDeploymentTarget.empty()) {
+            compile_toolchain_flags +=
+                " -mmacosx-version-min=" + macosDeploymentTarget;
+        }
+        llvmRootForStdlib = llvmRoot;
         // libc++ headers
         compile_toolchain_flags += " -isystem" + escape_path(libcxxInclude);
         if (!plan.toolchain.targetTriple.empty()) {
@@ -309,7 +349,71 @@ CompileFlags compute_flags(const BuildPlan& plan) {
     if constexpr (mcpp::platform::is_windows) {
         f.ld = user_ldflags + link_extra;
     } else if constexpr (mcpp::platform::needs_explicit_libcxx) {
-        f.ld = std::format("{}{}{} -lc++{}{}", full_static, static_stdlib, b_flag, user_ldflags, link_extra);
+        // macOS. Two min-version concerns (see xlings
+        // .agents/docs/2026-06-05-macos-min-version-support.md):
+        //
+        // 1. stdlib linkage — `-lc++` resolves to the SYSTEM
+        //    /usr/lib/libc++.1.dylib, which caps the deployment floor at
+        //    the build host's OS: e.g. std::print's __is_posix_terminal
+        //    support symbol only exists in macOS 15's libc++, so a
+        //    minos-14 binary dies at launch on 14 (dyld missing-symbol
+        //    abort; verified on macos-14 CI). With staticStdlib (the
+        //    manifest default — previously silently ignored on the clang
+        //    route), link LLVM's own libc++.a/libc++abi.a instead:
+        //    runtime deps shrink to libSystem and the floor drops to
+        //    14.0 — the floor of the official LLVM static archives;
+        //    lower needs a custom libc++ build. Falls back to -lc++ when the
+        //    archives are absent.
+        // 2. deployment target — mirror MACOSX_DEPLOYMENT_TARGET onto the
+        //    link command line so it doesn't depend on env propagation.
+        // 3. linker — use LLVM's own lld (same as the Linux clang path)
+        //    instead of Xcode's ld: the system ld's version floats with
+        //    the host Xcode (observed: Xcode 15.4's ld aborting at launch
+        //    on macos-14 CI when its libc++ resolution was diverted), and
+        //    lld ships with the exact toolchain doing the compile.
+        f.ldStdlibDefault = " -lc++";
+        f.ldStdlibTest    = " -lc++";
+        // Static libc++ is tied to an EXPLICIT deployment floor: when the
+        // user (or the release pipeline) declares a minimum macOS via the
+        // env var or [build] macos_deployment_target, the static LLVM
+        // libc++ is what makes that floor real (the system libc++ caps it
+        // at the build host's OS). With no declared floor, keep the
+        // 0.0.49 behavior — dynamic system libc++, host-coupled.
+        //
+        // TODO(macos-static-default): flip static to the unconditional
+        // default (rust-style "portable by default") once two tracked
+        // issues are fixed — (1) mixed C/C++ static binaries SIGSEGV at
+        // runtime (e2e 36_llvm_toolchain: answer.c + std::cout main.cpp,
+        // exit 139; root cause not yet isolated), (2) the std-module
+        // staging/fingerprint boundary (see canonical_compile_flags).
+        // TODO(macos-floor-11): the official LLVM archives are built for
+        // macOS 14; supporting 11-13 needs a custom libc++ build shipped
+        // via xlings-res (data-only change — swap the archive source).
+        // Both tracked in xlings
+        // .agents/docs/2026-06-05-macos-min-version-support.md §5.
+        if (f.staticStdlib && !macosDeploymentTarget.empty()
+            && !llvmRootForStdlib.empty()) {
+            auto libDir     = llvmRootForStdlib / "lib";
+            auto libcxxA    = libDir / "libc++.a";
+            auto libcxxAbiA = libDir / "libc++abi.a";
+            if (std::filesystem::exists(libcxxA)
+                && std::filesystem::exists(libcxxAbiA)) {
+                // Link the archives BY PATH. (-Wl,-hidden-l looked like
+                // the canonical choice, but lld resolves it like a plain
+                // -l and picks the sibling dylib in the same directory —
+                // the binary then carries @rpath/libc++.1.dylib with no
+                // rpath and dies at load. Observed on macos CI; path
+                // form verified end-to-end incl. macos-14.)
+                f.ldStdlibDefault = " -nostdlib++ " + escape_path(libcxxA)
+                                  + " " + escape_path(libcxxAbiA);
+            }
+        }
+        std::string version_min;
+        if (!macosDeploymentTarget.empty()) {
+            version_min = " -mmacosx-version-min=" + macosDeploymentTarget;
+        }
+        f.ld = std::format("{}{}{} -fuse-ld=lld{}{}{}", full_static, static_stdlib,
+                           b_flag, version_min, user_ldflags, link_extra);
     } else {
         f.ld = std::format("{}{}{}{}{}{}{}{}", full_static, static_stdlib, link_toolchain_flags, b_flag,
                            runtime_dirs, payload_ld, user_ldflags, link_extra);

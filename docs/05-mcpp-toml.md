@@ -91,7 +91,22 @@ cflags       = ["-DFOO=1"]        # 额外 C 编译参数
 cxxflags     = ["-DBAR=2"]        # 额外 C++ 编译参数(不要放 -std=...)
 ldflags      = ["-lfoo"]          # 额外链接参数
 static_stdlib = true               # 静态链接 libstdc++(默认 true)
+macos_deployment_target = "14.0"   # macOS 产物的最低支持系统版本(仅 macOS 生效)
 ```
+
+`macos_deployment_target` 设定产物 Mach-O 头里的最低系统版本
+(`LC_BUILD_VERSION minos`),即二进制能运行的最老 macOS。优先级与各生态
+惯例一致:环境变量 `MACOSX_DEPLOYMENT_TARGET`(单次调用的显式覆盖,
+cargo/rustc、cc 等同样尊重该变量)> 本字段(项目默认,类似 SwiftPM 的
+`platforms:`)> 工具链/SDK 默认。该值会进入 BMI 指纹——切换 target 会
+自动重建模块缓存。
+
+**声明 floor 即静态运行时**:显式设置了 deployment target(env 或本
+字段)且 `static_stdlib = true`(默认)时,macOS 链接会静态链入 LLVM
+自带的 libc++/libc++abi —— 系统 libc++ 会把实际可运行版本钉死在构建机
+的 OS(老系统缺新符号,如 `std::print` 的支撑符号),静态化才能真正
+兑现声明的 floor。注意 LLVM 官方静态库自身的下限是 **14.0**。未声明
+floor 时保持动态系统 libc++(产物只保证在构建机同版本及以上运行)。
 
 C++ 标准不要通过 `build.cxxflags = ["-std=..."]` 配置。请使用:
 

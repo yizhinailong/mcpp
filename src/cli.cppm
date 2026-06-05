@@ -587,6 +587,32 @@ std::string canonical_compile_flags(const mcpp::manifest::Manifest& m) {
     std::string s;
     s += "-std="; s += m.package.standard;
     s += " -fmodules";
+    // macOS deployment target changes the effective compile triple
+    // (arm64-apple-macosxNN) — a std.pcm built for one target cannot be
+    // loaded by a TU compiled for another. Fold the resolved value
+    // (env override > [build] macos_deployment_target manifest default)
+    // into the fingerprint so switching targets rebuilds the BMI cache
+    // instead of dying with a module config mismatch.
+    //
+    // TODO(macos-default-floor): a built-in default floor (rustc-style,
+    // see the 0.0.50 revert) cannot land until the std-module prebuild /
+    // staging pipeline consumes the SAME resolved value as this rule and
+    // flags.cppm — injecting a default here alone left the test build's
+    // std.pcm unstaged (import std failed wholesale on macos CI).
+    // Centralize the resolution in one helper, then re-land.
+    // See xlings .agents/docs/2026-06-05-macos-min-version-support.md §5.
+    if constexpr (mcpp::platform::is_macos) {
+        std::string dtv;
+        if (const char* dt = std::getenv("MACOSX_DEPLOYMENT_TARGET"); dt && *dt) {
+            dtv = dt;
+        } else {
+            dtv = m.buildConfig.macosDeploymentTarget;
+        }
+        if (!dtv.empty()) {
+            s += " macos_deployment_target=";
+            s += dtv;
+        }
+    }
     if (!m.buildConfig.cStandard.empty()) {
         s += " c_standard=";
         s += m.buildConfig.cStandard;
