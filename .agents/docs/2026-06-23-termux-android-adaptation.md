@@ -197,11 +197,43 @@ set_robust_list(0x.., 24)
 被拦的是 **`set_robust_list`**(musl 启动时 `__init_tp` 为主线程注册 robust mutex 链表)。
 Android 13 app 沙盒的 seccomp 把它 **TRAP 成 SIGSYS**(而非返回 ENOSYS)。
 
+### 交叉 vs 原生工具链(必须分清)
+生态里有两套 aarch64 相关的 musl-gcc,极易混淆:
+
+| | **交叉工具链** | **原生工具链 = "原生包"** |
+|---|---|---|
+| xim 包名 | `xim:aarch64-linux-musl-gcc` | `xim:musl-gcc`(aarch64 上) |
+| 资产名 | `aarch64-linux-musl-gcc-15.1.0-**linux-x86_64**.tar.gz` | `musl-gcc-15.1.0-**linux-aarch64**.tar.gz` |
+| gcc/g++ 二进制本身 | **x86_64 ELF**(在 x86_64 机器上跑) | **aarch64 ELF**(在 aarch64 设备上跑) |
+| 编译出的程序 | aarch64 | aarch64 |
+| 用途 | 在 x86_64 上**交叉编译** xlings/mcpp 的 aarch64 版(release CI) | 在 aarch64 Termux 上 **`mcpp build` 本地编译** |
+| musl | **1.2.5** ✅ | **1.2.6** ❌ |
+| §5 strip+deref 的 | 否 | **就是它** |
+
+- "交叉"的 gcc 跑在 x86_64(host=x86_64, target=aarch64)→ xlings/mcpp 的 aarch64 版是它编的,
+  所以那些二进制链的是 musl 1.2.5,能跑。
+- "原生"的 gcc 跑在 aarch64(host=target=aarch64)→ Termux 上 `mcpp build` 装的 `xim:musl-gcc@15.1.0`
+  就是它,二进制自身链了 musl 1.2.6 → 启动调 `set_robust_list` → SIGSYS。
+- 用户报错路径 `.mcpp/.../xpkgs/xim-x-musl-gcc/15.1.0/bin/aarch64-linux-musl-g++` = 原生包里的 g++。
+
 ### 关键不对称 + 根因
 | 工具链 | musl | set_robust_list | Android 13 |
 |---|---|---|---|
 | 交叉(构建 xlings/mcpp 用) | **1.2.5** | ❌ 不调 | ✅ 能跑 |
 | 原生 musl-gcc 包(Termux 编译用) | **1.2.6** | ✅ 启动就调 | ❌ SIGSYS |
+
+### 为什么同一套 musl-cross-make 出来的 musl 版本不一样?
+都是 musl-cross-make 构建,但 **`musl-cross-make.lua` 的 config.mak 模板没 pin `MUSL_VER`**
+(只有 `GCC_VER` / `TARGET` / `OUTPUT`)→ 每次构建吃"当时那个 musl-cross-make 的默认 musl":
+- musl-cross-make 当前 `Makefile` 默认 `MUSL_VER = 1.2.5`;`config.mak.dist` 有注释行
+  `# MUSL_VER = git-master`。
+- **交叉工具链**:用了默认稳定版 **1.2.5**(不调 set_robust_list)。
+- **原生包**:吃到 **1.2.6** —— 这是 musl 1.2.5 **之后的开发版**(git-master 报告的下一个
+  版本号即 1.2.6),它新增了主线程启动期 `set_robust_list` 注册。说明构建原生包时显式选了
+  `MUSL_VER = git-master`、或用了不同时间点/配置的 musl-cross-make。
+- **没 pin 版本 → 两次构建吃到不同 musl** = 根本原因。
+- **根治**:config.mak 模板**显式 pin `MUSL_VER = 1.2.5`**,锁定所有工具链(交叉 + 原生)到同一个
+  Android 兼容 musl,杜绝默认版本漂移。
 
 实测:
 - 交叉 `aarch64-linux-musl-gcc`(musl 1.2.5)产出的 hello + xlings 二进制,strace **只有
