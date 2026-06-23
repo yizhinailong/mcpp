@@ -247,17 +247,22 @@ Android 13 app 沙盒的 seccomp 把它 **TRAP 成 SIGSYS**(而非返回 ENOSYS)
 差异来源:`musl-cross-make.lua` 的 config.mak 模板**没 pin `MUSL_VER`** → 用 musl-cross-make
 默认版本;建交叉工具链时默认 1.2.5,后来建原生包时默认涨到 1.2.6。
 
-### 修复(进行中,Plan C)
-用 **musl 1.2.5** 重建原生 aarch64 musl-gcc:`config.mak` 加 `MUSL_VER = 1.2.5`。
-构建环境三方案:
-- A. 真 aarch64 机器(最稳)。
-- B. qemu-aarch64 模拟构建(本机可跑,gcc bootstrap 模拟 10+ 小时)。
-- **C. canadian-cross(本次采用)**:本机 x86_64 速度,用现成交叉工具链编译 host=aarch64
-  的 gcc/g++,二进制链接 musl 1.2.5。
+### 修复(✅ 已完成,Plan C)
+用 **musl 1.2.5** 重建原生 aarch64 musl-gcc。三方案:A. 真 aarch64 机器;B. qemu 模拟
+(10+ 小时);**C. canadian-cross(已采用,~15 分钟)**——本机 x86_64 用现成交叉工具链
+(musl 1.2.5)编 host=aarch64 的 gcc/g++,产物链 musl 1.2.5。
 
-修复后:原生 gcc 二进制不再调 `set_robust_list` → Android 13 能跑 → `mcpp build` 在 Termux
-上闭环。同时应给 `musl-cross-make.lua` **显式 pin `MUSL_VER = 1.2.5`**,避免未来默认版本漂移
-再次引入 1.2.6(或更高)的不兼容。
+**完整可复现步骤、踩坑(gawk PMA segfault→`setarch -R`、损坏 options-urls.cc、
+`--disable-decimal-float` 炸 libgcc、usr/ sysroot 软链)、验证、打包、上传**,
+见独立文档 [2026-06-23-aarch64-musl-gcc-canadian-cross-rebuild.md](./2026-06-23-aarch64-musl-gcc-canadian-cross-rebuild.md)。
+
+**产物已上架**:`musl-gcc-15.1.0-linux-aarch64.tar.gz`,80MB/194MB,
+sha256 `2277f07cd4fff2111f37182ad49dc331ccc13b6aef7dde31c704bf7dbdb0f326`,
+musl 1.2.5、**strace 0 次 set_robust_list**、静态、dereferenced。github + gitcode
+xlings-res 两端字节一致。
+
+**根治已落地**:`xim-pkgindex/pkgs/m/musl-cross-make.lua` 的 config.mak 模板已 **显式 pin
+`MUSL_VER = 1.2.5`**,所有后续工具链锁定 1.2.5,杜绝默认版本漂移再引入 1.2.6+。
 
 ### 经验 / 待办
 - 任何"在 Android 上运行"的 musl-static 二进制都必须避开 musl ≥1.2.6 的启动期
