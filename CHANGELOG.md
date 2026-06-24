@@ -3,6 +3,26 @@
 > 本文件追踪 `mcpp-community/mcpp` 公开仓的版本演进。
 > 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.0.62] — 2026-06-24
+
+### 修复
+
+- **macOS 链接 `library not found for -lSystem`**(#43):macOS 链接命令此前从不显式传 SDK,
+  链接侧靠 clang 隐式探测(xcrun/`SDKROOT` → ld64 `-syslibroot`)去找 `libSystem`。干净的 CI
+  Xcode runner 上探测正常、缺陷被掩盖;真机一旦 `xcode-select` 指向异常 / 只装 Command Line
+  Tools / 新装 bundled clang,探测失效就 `ld64.lld: library not found for -lSystem` + 所有 libc
+  符号未定义。修复:`f.ld` 显式追加 `-isysroot <SDK>`,并给 `macos::sdk_path()` 加多级回退
+  (`SDKROOT` → `xcrun` → `xcrun --sdk macosx` → `xcode-select -p` 推导 → 固定路径),即便
+  xcrun 返回空也能定位 SDK,把链接从「碰运气」变「确定」。(#162)
+- **macOS 首跑需手动回车 / stdin 挂起**:装 POSIX 工具链时进程等待 stdin,POSIX 路径也 seal
+  stdin(`</dev/null`),不再要求交互按键。(#163)
+
+### 测试
+
+- 新增跨平台 e2e `76_compile_commands_generated.sh`:`mcpp new` + `mcpp build` 一个最小工程,
+  在 Linux / macOS / Windows 三平台断言根目录生成合法 `compile_commands.json`。因 `mcpp build`
+  含链接步骤,它同时是 macOS `-lSystem` 链接缺陷的跨平台回归哨兵。(#165)
+
 ## [0.0.61] — 2026-06-24
 
 ### 新增
