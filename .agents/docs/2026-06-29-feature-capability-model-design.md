@@ -1,8 +1,9 @@
 # Feature System v2 — Capability-Oriented Model (Design)
 
 Date: 2026-06-29
-Status: **S1 + S3 implemented & shipped** (see Implementation Status below);
-S2 scoped as the documented next stage.
+Status: **S1 + S2a + S3 + interface-define propagation implemented & shipped**
+(see Implementation Status below); the full eigen[backend-openblas] ecosystem
+closed loop is validated end-to-end.
 Scope: `src/manifest.cppm` (parse), `src/build/prepare.cppm` (feature activation +
 resolver), `src/cli.cppm` / `src/cli/cmd_build.cppm` (`--cap`), mcpp-index recipe schema.
 
@@ -18,14 +19,42 @@ resolver), `src/cli.cppm` / `src/cli/cmd_build.cppm` (`--cap`), mcpp-index recip
   `[capabilities]` pins and `--cap`. Tests: `e2e/81_capability_binding.sh`
   (6 cases), `Manifest.CapabilitiesProvidesRequiresAndPins`,
   `SynthesizeFromXpkgLua.CapabilitiesAndFeatureDefines`.
-- **Stage 2 — optional-dep activation + feature-union unification: NEXT.**
-  Deliberately deferred from this release. Rationale: activating a *new*
-  dependency from a feature requires moving feature computation ahead of
-  dependency resolution (resolution-phase reordering) — a deeper, higher-risk
-  change. It is also **not required** for the capability/Eigen use case, which
-  binds over providers that are explicitly declared as dependencies. Shipping
-  S1+S3 first matches this doc's "each stage independently shippable" intent and
-  keeps the release low-risk.
+- **Stage 2a — feature-activated optional dependencies: DONE.** A dependency
+  declared under `[feature-deps.<name>]` (TOML) or a feature's nested `deps`
+  (Lua) is pulled into the worklist only when that feature is active. Feature
+  activation (including transitive `implies`) is computed ahead of the
+  resolution worklist via local lambdas in `prepare.cppm` (kept local to avoid a
+  GCC-16 modules-BMI bug). Tests: `e2e/82_feature_optional_deps.sh`,
+  `Manifest.FeatureDepsTomlSection`, `SynthesizeFromXpkgLua.FeatureDepsAndImplies`.
+- **Interface-define propagation (header-only providers): DONE.** A dependency's
+  active-feature `defines` are **interface requirements**: they flow into every
+  consumer's own compile flags along Public/Interface dependency edges, mirroring
+  `include_dirs`. This is required for header-only libraries whose feature switch
+  only takes effect in the TU that includes their headers — the canonical case is
+  Eigen's `use_blas` → `EIGEN_USE_BLAS`, which must be defined when the
+  *consumer* compiles `a * b`, not only when Eigen's own anchor TU compiles. The
+  automatic `MCPP_FEATURE_<NAME>` macro stays private to the owning package (it
+  is a build signal, not a public contract). Implemented by routing feature
+  defines through `PackageRoot::publicUsage` and extending the
+  `computeUsageRequirements()` fixpoint to propagate `cflags`/`cxxflags`. Test:
+  `e2e/83_feature_defines_propagate.sh`.
+- **Stage 2b — feature-union unification across multiple consumers: NEXT.**
+  Deliberately deferred. When two consumers request different feature sets on the
+  same dependency, the activated set should be their union (single resolved
+  instance). The current model activates per the first-seen consumer's request;
+  divergent transitive feature requests are not yet unified. Not required for the
+  validated Eigen/OpenBLAS use case.
+
+### Validated closed loop (eigen[backend-openblas])
+
+`mcpp build` of a consumer declaring
+`compat.eigen = { features = ["backend-openblas"] }` exercises every stage:
+`backend-openblas` → (implies) `use_blas` → `-DEIGEN_USE_BLAS` propagated to the
+consumer's TUs + `requires "blas"`; `[feature-deps]` pulls `compat.openblas`,
+whose xpkg `install()` hook builds `libopenblas.a` from source (BLAS-only,
+`TARGET=GENERIC`, no Fortran) via the `xim:make` build-dep; `provides "blas"`
+binds the capability; the provider's `-lopenblas` links. Verified: the produced
+binary pulls OpenBLAS's `dgemm_` (not Eigen's built-in GEMM) and runs.
 
 ---
 
@@ -99,6 +128,51 @@ Spack, Nixpkgs, pkg-config. Distilled lessons that shaped this design:
 2. "Pick one backend" is a **single-valued capability slot**, which gives
    mutual exclusion structurally — no constraint DSL, no `backend-*` boolean
    pile.
+
+### Corollary — a feature define is an *interface* requirement
+
+Rule 1 names *what* a feature may contribute to compilation (a package-owned,
+namespaced define); it does not, by itself, fix *where* that define applies. For
+a **header-only** provider the answer is forced: the library has no sources of
+its own, so its feature switch only takes effect in the translation unit that
+*includes its headers* — i.e. in the **consumer**. `EIGEN_USE_BLAS` must be
+defined when the consumer compiles `a * b`, not (only) when Eigen's anchor TU
+compiles. Therefore a feature's `defines` are treated as **interface
+requirements**: they propagate to consumers along Public/Interface dependency
+edges, on exactly the same machinery and visibility discipline as a dependency's
+public `include_dirs` (`PackageRoot::publicUsage`, the `computeUsageRequirements`
+fixpoint). This is the realization of Rule 1 for header-only providers, not an
+exception to it — the define stays package-owned and namespaced; only its scope
+is corrected.
+
+Why this does **not** reintroduce the vcpkg failure mode ("flags leak into the
+ABI, break composition"):
+
+- **Only the namespaced, library-owned define crosses the boundary** — never
+  free-form flags. Link flags / include paths still come from the bound
+  provider's own build config (Rule 1 intact).
+- **Visibility-bounded.** Propagation follows the same Public/Interface edges as
+  include dirs; a `private` dependency edge keeps the define off the consumer's
+  public interface.
+- **ODR-safe by single-instance propagation.** Activation is unioned onto a
+  single shared provider instance (Cargo model); propagation flows outward from
+  that one `publicUsage`, so every consumer of the provider sees the *same*
+  define set. A header-only library compiled with the switch in one TU and
+  without it in another would be an ODR violation — single-instance propagation
+  structurally prevents that split.
+- **The automatic `MCPP_FEATURE_<NAME>` macro is deliberately NOT propagated.**
+  It is not namespaced by the library (two packages may each declare a
+  `use_blas` feature → colliding `MCPP_FEATURE_USE_BLAS`), so it stays private to
+  the owning package as a local build signal. Only the namespaced user define is
+  an interface contract — which reinforces, rather than relaxes, Rule 1.
+
+Simplicity note (少即是多): *all* feature defines are interface defines; mcpp does
+**not** add a CMake-style PUBLIC/PRIVATE/INTERFACE tri-state for defines — that is
+precisely the complexity this design avoids. A define that happens to matter only
+to the provider's own `.cpp` still propagates, but lands in consumers as an
+unused, namespaced `-D` (harmless). Should a genuinely provider-private feature
+define ever be needed, a `private-defines` key is the future-proofing escape
+hatch; it is YAGNI today.
 
 ## 4. The model — two primitives
 
