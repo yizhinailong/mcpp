@@ -225,22 +225,17 @@ int install_direct(const Env& env, std::string_view target, bool quiet = false);
 
 // Write .xlings.json seed file.
 //
-// TODO(mirror-default): the default `"CN"` is the historical setting for
-// the project's initial Chinese-mainland user base, but it bites overseas
-// users (and CI on GitHub-hosted runners) — the first network roundtrip
-// goes through a CN mirror that is slow/unreachable for them. The
-// `mcpp self config --mirror X` flow now passes the user's choice as an
-// override through to here, so they can pick the right mirror BEFORE the
-// first download. Longer term, consider:
-//   (a) flip the default to "GLOBAL" and have CN users opt in via
-//       `mcpp self config --mirror CN` (smaller blast radius once docs
-//       cover the switch); or
-//   (b) auto-detect on first init (env hint like LANG, a quick HEAD probe
-//       to github.com vs. ghproxy with a tight timeout, and pin the
-//       winning value into .xlings.json).
+// The `mirror` default is "auto": xlings' own adaptive mirror module
+// (xlings.core.mirror.adaptive — latency-probed with per-download failover and
+// failure penalisation) then picks the best reachable host per download. This
+// replaces the historic hardcoded "CN", which FORCED the CN mirror and disabled
+// that mechanism — stranding overseas users and GitHub-hosted CI on a
+// slow/unreachable gitcode. An explicit `mcpp self config --mirror CN|GLOBAL`
+// still writes that fixed value (config priority). Mirror selection is xlings'
+// responsibility; mcpp just declines to override it by default.
 void seed_xlings_json(const Env& env,
                       std::span<const std::pair<std::string,std::string>> repos,
-                      std::string_view mirror = "CN");
+                      std::string_view mirror = "auto");
 
 // Persist the xlings mirror selection in .xlings.json via xlings itself.
 int config_show(const Env& env);
@@ -1232,11 +1227,29 @@ bool is_official_package_index_fresh(const Env& env,
 
 int update_index(const Env& env, bool quiet) {
     std::string cmd = build_command_prefix(env) + " update 2>&1";
-    int rc = mcpp::platform::process::run_streaming(cmd,
-        [quiet](std::string_view line) {
-            if (!quiet) std::println("{}", line);
-        });
-    if (rc == 0) mark_known_indexes_refreshed(env);
+    // The index sync is a network git operation; a single transient blip (DNS,
+    // TLS reset, a mirror hiccup) otherwise fails a cold `mcpp self env` /
+    // first-run init outright (e.g. CI's index/sandbox bootstrap). Retry with
+    // linear backoff. The success path returns on the FIRST attempt — zero
+    // added latency in steady state; only a genuine failure pays the backoff.
+    constexpr int kMaxAttempts = 3;
+    int rc = 0;
+    for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+        rc = mcpp::platform::process::run_streaming(cmd,
+            [quiet](std::string_view line) {
+                if (!quiet) std::println("{}", line);
+            });
+        if (rc == 0) { mark_known_indexes_refreshed(env); return 0; }
+        if (attempt < kMaxAttempts) {
+            int delay = attempt * 2;  // 2s, then 4s
+            mcpp::log::verbose("index", std::format(
+                "index update attempt {}/{} failed (rc {}); retrying in {}s",
+                attempt, kMaxAttempts, rc, delay));
+            std::this_thread::sleep_for(std::chrono::seconds(delay));
+        }
+    }
+    mcpp::log::verbose("index", std::format(
+        "index update failed after {} attempts (rc {})", kMaxAttempts, rc));
     return rc;
 }
 
