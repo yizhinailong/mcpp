@@ -51,26 +51,35 @@ Meanwhile xlings *already* models a full per-project environment (`xvm/README.md
 per-version `envs`, and named/anonymous `subos` (a project sandbox at
 `<proj>/.xlings/subos/...` with its own `bin/lib/usr`). **mcpp surfaces none of it.**
 
-### Design — `[environment]` materializes 1:1 onto xlings keys
-Do **not** invent new vocabulary. A `mcpp.toml` `[environment]` block maps directly
-to the xlings `.xlings.json` schema and is written into mcpp's existing project file
-`<proj>/.mcpp/.xlings.json` (extend the `index_repos`-only writer at
-`config.cppm:699-705` to also emit `deps`/`workspace`/`envs`/`subos`):
+### Design — `[xlings]` IS the xlings project-config schema (1:1, no translation)
+Do **not** invent vocabulary. The manifest section is named **`[xlings]`** and its
+subsections **mirror `.xlings.json`'s keys exactly** (`workspace` / `deps` / `subos`
+/ `envs`), so materialization is a literal **passthrough** into mcpp's existing
+project file `<proj>/.mcpp/.xlings.json` — extend the `index_repos`-only writer at
+`config.cppm:699-705` to also emit these keys. (Decision: align to xlings, since
+xlings already owns this exact model.)
 
 ```toml
-[environment]
+[xlings]
 subos = "dev"                          # → .xlings.json "subos" (named project sandbox)
-tools = ["make@4", "python@3.13.1"]    # → "deps" (host build-tools; bare `xlings install` provisions)
-[environment.workspace]                # → "workspace" (pin tool versions; per-OS values allowed)
+deps  = ["make@4", "python@3.13.1"]    # → "deps" (host build-tools; bare `xlings install` provisions)
+
+[xlings.workspace]                     # → "workspace" (pin tool versions; per-OS values allowed)
 gcc = "16.1.0"
-[environment.env]                      # → per-tool "envs" applied by xvm shims
+clang = { linux = "20.1.7", windows = "20.1.7" }   # per-OS keyed, like xlings
+
+[xlings.envs]                          # → per-tool "envs", applied by xvm shims
 OPENBLAS_NUM_THREADS = "1"
 ```
 
-- **`[toolchain]` folds in**: today it installs globally; route it into the project
-  `workspace` so two checkouts on one machine pin different compilers via xvm shims
-  (xlings supports this; mcpp just never seeds it). `[toolchain]` stays as the
-  ergonomic shorthand; `[environment.workspace]` is the general form.
+- **`[toolchain]` folds in**: today it installs globally; route it into
+  `[xlings.workspace]` so two checkouts on one machine pin different compilers via
+  xvm shims (xlings supports this; mcpp just never seeds it). `[toolchain]` stays as
+  the ergonomic shorthand; `[xlings.workspace]` is the general form (same key xlings
+  reads).
+- **Naming rationale**: `[xlings]` signals "this configures the xlings-backed build
+  environment" and makes the writer a 1:1 key copy — no `[environment]`→xlings
+  translation layer to drift. Subsection names track `.xlings.json` verbatim.
 - **Provisioning** = the already-wired project-mode `build_command_prefix`
   (`xlings.cppm:716-724`) + bare `xlings install` over the emitted `deps`.
 - **This is purely "surface + writer"** — no new resolution machinery; the
@@ -99,8 +108,8 @@ consumer in `prepare`/`plan`). They answer two orthogonal questions:
 1. **Recipe source-build tools** — `xpm.<os>.deps` in an xpkg recipe (`xim:python`,
    `xim:make`); host, install-time, resolved by xim/`pkginfo.build_dep`. *This is
    where `compat.xcb`'s Python lives.*
-2. **Project environment tools** — L-1 `[environment].tools` (host tools the project
-   needs available: cmake, protoc).
+2. **Project environment tools** — L-1 `[xlings].deps` (host tools the project needs
+   available: cmake, protoc; materialized into `.xlings.json` `deps`).
 3. **`build.mcpp` libraries** — `[build-dependencies]` (host libraries the native
    build program links). **Wire this here** — it gains a real consumer at L3.
 
@@ -239,7 +248,8 @@ missing declared outputs as failure.
   `insert()` keeps an existing unconditional entry (no silent override). Test:
   `tests/e2e/86_target_cfg_dependencies.sh`. **Still TODO:** `lazy = true` (fetch only
   when a gated path requests it) + content-hash identity.
-- **Phase 2 — L-1 environment.** Surface `[environment]` → extend the project
+- **Phase 2 — L-1 environment.** Surface `[xlings]` (+ `[xlings.workspace]`/`.deps`/
+  `.subos`/`.envs`, 1:1 with `.xlings.json`) → extend the project
   `.xlings.json` writer (`config.cppm:699-705`) to emit `deps`/`workspace`/`envs`/`subos`;
   fold `[toolchain]` into `workspace`; wire `[build-dependencies]`.
 - **Phase 3 — mcpp-index workspace** (companion doc) — first real consumer of Phase 1/1b.
