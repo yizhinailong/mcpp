@@ -38,7 +38,11 @@ git config user.name  "xlings-ci"
 git checkout -q -B "$BRANCH"
 
 info "version-check.py --apply --only $PROJ"
-python3 .github/scripts/version-check.py --apply --only "$PROJ" > "$WORK/report.json" || {
+# --workspace: version-check.py defaults its repo root to GITHUB_WORKSPACE,
+# which inside the RELEASE repo's runner is the release repo — not this
+# freshly-cloned index. Point it at the clone explicitly ("error: …/pkgs not
+# found" was this default kicking in; observed on the 0.0.83 release).
+python3 .github/scripts/version-check.py --workspace . --apply --only "$PROJ" > "$WORK/report.json" || {
   echo "[bump] version-check failed:" >&2; cat "$WORK/report.json" >&2 2>/dev/null || true; exit 1;
 }
 
