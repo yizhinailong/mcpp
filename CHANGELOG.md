@@ -3,7 +3,26 @@
 > 本文件追踪 `mcpp-community/mcpp` 公开仓的版本演进。
 > 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [0.0.83] — 2026-07-07
+## [0.0.84] — 2026-07-08
+
+### 修复
+
+- **clang 驱动配置文件(cfg)补全头文件搜索路径**:`fixup_clang_cfg` 再生成的
+  cfg 此前仅包含链接相关条目(`-B`/`-L`/动态链接器/rpath),缺少 C 标准库头文件
+  与内核头文件的搜索路径。该 cfg 服务于直接调用打包内 `clang`/`clang++`
+  (不经由 mcpp)的场景:缺少这两项时,此类调用仅在宿主系统存在
+  `/usr/include` 时可编译(依赖宿主环境,违背沙箱自包含约束),在无宿主开发头
+  文件的环境中直接报头文件缺失错误。本次补充
+  `-isystem <glibc payload>/include` 与 `-isystem <linux-headers payload>/include`,
+  置于 libc++ 头文件条目之后以保持 `#include_next` 搜索链;生成内容与
+  xim-pkgindex 侧 `llvm.lua` 安装期生成的 cfg 保持一致,消除两个生成端之间的
+  内容差异。fixup 修订号升级至 `hermetic-3`,既有 payload 在下一次构建时自动
+  重新收敛,无需重新安装。验证方式:以 `--sysroot=<空目录>` 屏蔽宿主头文件后,
+  由 cfg 驱动的 `clang`/`clang++` 直接调用编译与运行均通过;移除上述搜索路径的
+  对照组按预期失败。mcpp 自身构建路径不受影响(构建 flags 由 linkmodel
+  独立提供,不读取 cfg)。
+
+
 
 ### 修复
 
