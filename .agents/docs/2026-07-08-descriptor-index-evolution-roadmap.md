@@ -25,7 +25,7 @@ train (seam documented, deferred until demanded).
 | W3 scan_overrides | ✅ done (ea7ea43) | fmt WITHOUT generated_files builds + tests green end-to-end |
 | W4 ddi reconciliation | ✅ done (9211fd4) | negative test: omitted imports={std} → DYNDEP fails with planned-vs-compiler delta |
 | W5 index floor | ✅ done (94e4c6b) | E0006 + upgrade hint + once-per-index; ignore hatch; 9.9.9/0.0.84 e2e. Deviation: staged-unpack lives in vendored xlings → follow-up there; open-time check is the mcpp-side enforcement |
-| W6 release 0.0.85 | 🔄 PR #200 open, CI running | version bumped; docs/05 scan_overrides section; key e2e green |
+| W6 release 0.0.85 | ✅ SHIPPED | PR #200 merged (6/6 CI, squash 53b6ead); v0.0.85 released (all-platform assets); xlings-res/mcpp mirrored GitHub 8/8 + GitCode 8/8 (per-file 200-verified); xim-pkgindex #342 merged (latest→0.0.85); workspace pin bumped (1bca359); fresh-install dispatched |
 
 Findings during W6 hardening (both fixed in PR #200):
 - **Corpus dry-run of strict lint over all 42 mcpp-index descriptors** caught:
@@ -37,10 +37,20 @@ Findings during W6 hardening (both fixed in PR #200):
   manifest split became three separate modules + umbrella (same API).
 
 | P1..P3 prepared | see mcpp-index adoption plan progress table | branches feat/index-floor-0.0.85 (2523dd9), feat/long-bracket-migrations (7f1e624) |
-| P0 merge PR #63 | pending maintainer | tested locally 2026-07-08, green on 0.0.81 |
-| P1 index floor PR | pending (after 0.0.85 release) | |
+| P0 merge PR #63 | still pending maintainer (untouched per instruction) | note: on 0.0.85 lint it must also pass xpkg parse — it does (verified) |
+| P1 index floor PR | ✅ merged (#65, 6/6 CI) — floor live; published artifact 651b707 verified to carry index.toml | |
 | P2 fmt → scan_overrides | ✅ validated locally only (per instruction: user's PR untouched) | override descriptor kept out of tree |
-| P3/P4 migrations + docs | pending (after P1) | |
+| P3/P4 migrations + docs | ✅ merged (#66, 6/6 CI) — nlohmann/eigen on [==[ ]==], parity byte-identical | |
+
+Ops incidents handled during rollout (all environmental, none code):
+- macOS CI: xlings llvm default bump 20.1.7→22.1.8 broke (a) hardcoded sandbox
+  path → fixed by dynamic discovery, (b) libc++ ABI (__hash_memory undefined at
+  link) → pinned 20.1.7, real fix belongs to hermetic-link track.
+- publish-ecosystem hung >1h on one GitHub asset upload (0.0.84 took 2min);
+  cancelled, mirrored manually: the stuck asset re-uploaded instantly, GitCode
+  side completed with per-file 200 verification.
+- xim-pkgindex linux-install-test: transient scode index fetch flake + the
+  missing asset 404; green after asset fix + retrigger.
 
 Decision taken during execution (user-directed): `--strict` semantics are the
 DEFAULT of `xpkg parse`; the escape flag is `--allow-unknown`.
