@@ -158,6 +158,17 @@ its consumers**. Two complementary gates:
 A1's root fix removes the specific macOS ceiling; the contract remains as
 defense-in-depth for the next regression of any kind.
 
+## Implementation plan (live, split from the order below)
+
+| # | Task | Repo / PR | Status |
+|---|------|-----------|--------|
+| R1 (A4) | pipeline hardening: timeouts, GH-side verify+retry, completeness gate, fresh-install bounded wait | mcpp `.github/` | 🔄 |
+| R2 (A1) | TestBinary → toolchain libc++ (dynamic+rpath); e2e otool assertion; unpin macOS llvm | mcpp `flags.cppm` | pending |
+| R3 (A3) | staged+atomic index acquisition | xlings `downloader.cppm` | pending |
+| R4 (C.1) | toolchain-bump consumer smoke | xim-pkgindex CI | pending |
+| R5 (A2) | cross gcc 16 packaging feasibility → floor bump → delete anchor | xlings-res packaging | pending |
+| R6 | mcpp 0.0.86 release + ecosystem closure (mirror / index bump / fresh-install) | all | pending |
+
 ## Order of execution
 
 | # | Fix | Cost | Unblocks |
