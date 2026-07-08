@@ -1343,3 +1343,174 @@ TEST(CanonicalIdentity, FromLuaReadsDeclaredFields) {
     EXPECT_EQ(mcpp::manifest::canonical_xpkg_identity_from_lua(noName),
               want("", ""));
 }
+
+// ── Descriptor grammar v2: Lua long-bracket strings + block comments ──
+// Design: .agents/docs/2026-07-08-index-version-semantics-and-descriptor-grammar-design.md (D1)
+
+TEST(XpkgLongBracket, GeneratedFilesMultiline) {
+    // Content carries braces, quotes, an embedded `]]` (level-2 brackets),
+    // and a leading newline that Lua semantics strip.
+    constexpr auto lua = R"(
+package = {
+    spec = "1",
+    name = "lbtest",
+    xpm  = { linux = { ["1.0.0"] = { url = "u", sha256 = "h" } } },
+    mcpp = {
+        sources = { "mcpp_generated/gen.cc" },
+        generated_files = {
+            ["mcpp_generated/gen.cc"] = [==[
+export module gen;
+int f() { return "x]]y"[0]; }
+]==],
+        },
+        targets = { ["gen"] = { kind = "lib" } },
+    },
+}
+)";
+    auto m = mcpp::manifest::synthesize_from_xpkg_lua(lua, "lbtest", "1.0.0");
+    ASSERT_TRUE(m.has_value()) << m.error().format();
+    ASSERT_TRUE(m->buildConfig.generatedFiles.contains("mcpp_generated/gen.cc"));
+    EXPECT_EQ(m->buildConfig.generatedFiles["mcpp_generated/gen.cc"],
+              "export module gen;\nint f() { return \"x]]y\"[0]; }\n");
+}
+
+TEST(XpkgLongBracket, BlockCommentWithBracesAndFakeMcpp) {
+    // A block comment containing braces and the literal text `mcpp = {`
+    // must neither corrupt the structural depth count nor false-match
+    // the segment locator.
+    constexpr auto lua = R"(
+--[==[
+decoy: mcpp = { sources = { "WRONG" } } }}}}
+]==]
+package = {
+    spec = "1",
+    name = "cmt",
+    xpm  = { linux = { ["1.0.0"] = { url = "u", sha256 = "h" } } },
+    mcpp = {
+        --[[ inline block comment { with braces } ]]
+        sources = { [[src/*.cpp]] },
+        targets = { ["cmt"] = { kind = "lib" } },
+    },
+}
+)";
+    auto m = mcpp::manifest::synthesize_from_xpkg_lua(lua, "cmt", "1.0.0");
+    ASSERT_TRUE(m.has_value()) << m.error().format();
+    ASSERT_EQ(m->modules.sources.size(), 1u);
+    EXPECT_EQ(m->modules.sources[0], "src/*.cpp");
+}
+
+TEST(XpkgLongBracket, NoLeadingNewlineKeptVerbatim) {
+    // Without a newline after the opening bracket, content starts
+    // immediately; CRLF right after the bracket is stripped as one break.
+    constexpr auto lua =
+        "package = {\n"
+        "    spec = \"1\",\n"
+        "    name = \"nl\",\n"
+        "    xpm  = { linux = { [\"1.0.0\"] = { url = \"u\", sha256 = \"h\" } } },\n"
+        "    mcpp = {\n"
+        "        sources = { \"g.cc\" },\n"
+        "        generated_files = { [\"g.cc\"] = [[inline]], [\"h.cc\"] = [[\r\ncrlf]] },\n"
+        "        targets = { [\"nl\"] = { kind = \"lib\" } },\n"
+        "    },\n"
+        "}\n";
+    auto m = mcpp::manifest::synthesize_from_xpkg_lua(lua, "nl", "1.0.0");
+    ASSERT_TRUE(m.has_value()) << m.error().format();
+    EXPECT_EQ(m->buildConfig.generatedFiles["g.cc"], "inline");
+    EXPECT_EQ(m->buildConfig.generatedFiles["h.cc"], "crlf");
+}
+
+TEST(XpkgLongBracket, UnknownKeysRecordedSchemaAccepted) {
+    constexpr auto lua = R"(
+package = {
+    spec = "1",
+    name = "uk",
+    xpm  = { linux = { ["1.0.0"] = { url = "u", sha256 = "h" } } },
+    mcpp = {
+        schema  = "0.1",
+        sources = { "a.c" },
+        bogus_key = "x",
+        future_table = { nested = { 1, 2 } },
+        targets = { ["uk"] = { kind = "lib" } },
+    },
+}
+)";
+    auto m = mcpp::manifest::synthesize_from_xpkg_lua(lua, "uk", "1.0.0");
+    ASSERT_TRUE(m.has_value()) << m.error().format();
+    ASSERT_EQ(m->xpkgUnknownKeys.size(), 2u);
+    EXPECT_EQ(m->xpkgUnknownKeys[0], "bogus_key");
+    EXPECT_EQ(m->xpkgUnknownKeys[1], "future_table");
+}
+
+// ── scan_overrides: author-asserted scan results ──
+// Design: .agents/docs/2026-07-08-scanner-backend-abstraction-design.md §3-pre
+
+TEST(ScanOverrides, XpkgSegmentParses) {
+    constexpr auto lua = R"(
+package = {
+    spec = "1",
+    namespace = "fmtlib",
+    name = "fmtlib.fmt",
+    xpm  = { linux = { ["12.2.0"] = { url = "u", sha256 = "h" } } },
+    mcpp = {
+        sources  = { "*/src/fmt.cc" },
+        cxxflags = { "-DFMT_IMPORT_STD" },
+        scan_overrides = {
+            ["*/src/fmt.cc"] = { provides = { "fmt" }, imports = { "std" } },
+        },
+        targets  = { ["fmt"] = { kind = "lib" } },
+    },
+}
+)";
+    auto m = mcpp::manifest::synthesize_from_xpkg_lua(lua, "fmtlib.fmt", "12.2.0");
+    ASSERT_TRUE(m.has_value()) << m.error().format();
+    ASSERT_EQ(m->modules.scanOverrides.size(), 1u);
+    auto& ov = m->modules.scanOverrides.at("*/src/fmt.cc");
+    ASSERT_EQ(ov.provides.size(), 1u);
+    EXPECT_EQ(ov.provides[0], "fmt");
+    ASSERT_EQ(ov.imports.size(), 1u);
+    EXPECT_EQ(ov.imports[0], "std");
+    EXPECT_TRUE(m->xpkgUnknownKeys.empty());
+}
+
+TEST(ScanOverrides, XpkgRejectsEmptyDeclaration) {
+    constexpr auto lua = R"(
+package = {
+    spec = "1",
+    name = "so",
+    xpm  = { linux = { ["1.0.0"] = { url = "u", sha256 = "h" } } },
+    mcpp = {
+        sources = { "a.cc" },
+        scan_overrides = { ["a.cc"] = { } },
+        targets = { ["so"] = { kind = "lib" } },
+    },
+}
+)";
+    auto m = mcpp::manifest::synthesize_from_xpkg_lua(lua, "so", "1.0.0");
+    ASSERT_FALSE(m.has_value());
+    EXPECT_NE(m.error().message.find("neither provides nor imports"),
+              std::string::npos) << m.error().format();
+}
+
+TEST(ScanOverrides, TomlParses) {
+    constexpr auto src = R"(
+[package]
+name = "app"
+version = "0.1.0"
+[language]
+standard = "c++23"
+[modules]
+sources = ["src/**/*.cppm", "vendor/fmt.cc"]
+["scan_overrides"."vendor/fmt.cc"]
+provides = ["fmt"]
+imports  = ["std"]
+[targets.app]
+kind = "bin"
+main = "src/main.cpp"
+)";
+    auto m = mcpp::manifest::parse_string(src);
+    ASSERT_TRUE(m.has_value()) << m.error().format();
+    ASSERT_EQ(m->modules.scanOverrides.size(), 1u);
+    auto& ov = m->modules.scanOverrides.at("vendor/fmt.cc");
+    EXPECT_EQ(ov.provides, std::vector<std::string>{"fmt"});
+    EXPECT_EQ(ov.imports,  std::vector<std::string>{"std"});
+}
