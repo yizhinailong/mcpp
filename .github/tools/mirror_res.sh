@@ -68,10 +68,19 @@ if [[ -n "${XLINGS_RES_TOKEN:-}" ]] || gh auth status >/dev/null 2>&1; then
     fi
     for try in 1 2 3 4 5; do
       GH_TOKEN="${XLINGS_RES_TOKEN:-}" timeout 300 gh release upload "$VER" "$DL/$a" -R "$GH_DST" --clobber || true
-      if [[ "$(curl -fsSL -o /dev/null -w '%{http_code}' -L "https://github.com/${GH_DST}/releases/download/${VER}/${a}" 2>/dev/null)" == 200 ]]; then
-        break
-      fi
-      echo "[mirror] gh $a not 200 after try $try; delete + reupload..."
+      # Freshly uploaded assets take a few seconds to propagate to the
+      # download CDN. Verify with patience — an eager 404→delete loop
+      # DELETED successfully uploaded assets over and over (0.0.86
+      # incident). Only delete + retry after propagation clearly failed.
+      ok=""
+      for v in 1 2 3 4 5 6; do
+        sleep 3
+        if [[ "$(curl -fsSL -o /dev/null -w '%{http_code}' -L "https://github.com/${GH_DST}/releases/download/${VER}/${a}" 2>/dev/null)" == 200 ]]; then
+          ok=1; break
+        fi
+      done
+      [[ -n "$ok" ]] && break
+      echo "[mirror] gh $a still not 200 ~18s after upload (try $try); delete + reupload..."
       GH_TOKEN="${XLINGS_RES_TOKEN:-}" gh release delete-asset "$VER" "$a" -R "$GH_DST" -y 2>/dev/null || true
       sleep 4
     done
@@ -95,9 +104,14 @@ if [[ -n "${GITCODE_TOKEN:-}" ]] && command -v gtc >/dev/null 2>&1; then
     fi
     for try in 1 2 3 4 5; do
       timeout 300 gtc release upload "$GTC_DST" "$DL/$a" --tag "$VER" >/dev/null 2>&1 || true
-      if [[ "$(curl -fsSL -o /dev/null -w '%{http_code}' -L "https://gitcode.com/${GTC_DST}/releases/download/${VER}/${a}" 2>/dev/null)" == 200 ]]; then
-        break
-      fi
+      ok=""
+      for v in 1 2 3 4 5 6; do
+        sleep 3
+        if [[ "$(curl -fsSL -o /dev/null -w '%{http_code}' -L "https://gitcode.com/${GTC_DST}/releases/download/${VER}/${a}" 2>/dev/null)" == 200 ]]; then
+          ok=1; break
+        fi
+      done
+      [[ -n "$ok" ]] && break
       echo "[mirror] gtc $a not 200 after try $try, retrying..."; sleep 4
     done
   done
