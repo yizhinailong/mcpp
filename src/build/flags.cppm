@@ -35,10 +35,11 @@ struct CompileFlags {
     std::string linkage;  // "static" or ""
     // macOS per-unit C++ stdlib link (appended via unit_ldflags):
     // distributable targets get the static LLVM libc++ (portable across
-    // macOS versions), TestBinary targets get the system -lc++ — they
-    // only ever run on the build host, and statically linked libc++
-    // SIGABRTs during static destruction unless the entry point guards
-    // with _Exit (mcpp/xlings do; gtest main does not). Empty on other
+    // macOS versions); TestBinary targets get the toolchain's own libc++
+    // DYNAMICALLY (-L + -lc++ + rpath into the toolchain) — host-only
+    // binaries, so the rpath is fine, and it keeps headers and dylib the
+    // same version (the system -lc++ they used before was a version split
+    // that broke on libc++ 22's out-of-line __hash_memory). Empty on other
     // platforms (stdlib handled by their existing paths).
     std::string ldStdlibDefault;
     std::string ldStdlibTest;
@@ -381,6 +382,30 @@ CompileFlags compute_flags(const BuildPlan& plan) {
                 //  - -Wl,-hidden-l resolves like a plain -l under lld
                 //    and picks the sibling DYLIB (load failure).
                 f.ldStdlibDefault = " -nostdlib++"
+                    " -Wl,-load_hidden," + escape_path(libcxxA)
+                  + " -Wl,-load_hidden," + escape_path(libcxxAbiA);
+            }
+        }
+        // TestBinary: SAME static -load_hidden libc++ as distributables.
+        // Tests previously took the SYSTEM -lc++ while compiling against the
+        // toolchain's libc++ HEADERS — a header/dylib version split that
+        // detonated when libc++ 22 moved string hashing out of line
+        // (undefined __hash_memory, 2026-07-08). The dynamic alternative
+        // (toolchain libc++.dylib + rpath) is a dead end with this
+        // distribution: its abi/unwind dylibs upward-link /usr/lib/libc++,
+        // so the SYSTEM libc++ still loads next to the toolchain's and
+        // gtest's initializers freed across the two copies
+        // (BUG_IN_CLIENT_OF_LIBMALLOC, CI crash forensics rounds 5-6).
+        // Static hidden archives keep exactly ONE libc++, inside the
+        // binary — the same already-proven shape mcpp/xlings ship with.
+        // Design: .agents/docs/2026-07-08-root-cause-remediation-design.md A1.
+        if (!llvmRootForStdlib.empty()) {
+            auto libDir     = llvmRootForStdlib / "lib";
+            auto libcxxA    = libDir / "libc++.a";
+            auto libcxxAbiA = libDir / "libc++abi.a";
+            if (std::filesystem::exists(libcxxA)
+                && std::filesystem::exists(libcxxAbiA)) {
+                f.ldStdlibTest = " -nostdlib++"
                     " -Wl,-load_hidden," + escape_path(libcxxA)
                   + " -Wl,-load_hidden," + escape_path(libcxxAbiA);
             }

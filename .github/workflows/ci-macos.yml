@@ -58,10 +58,10 @@ jobs:
 
       - name: Install LLVM via xlings
         run: |
-          # Pin 20.1.7: llvm 22.1.8's libc++ headers reference __hash_memory,
-          # absent from the libc++ the link resolves on macOS (ld64.lld
-          # undefined symbol; hermetic-link follow-up tracks the real fix).
-          xlings install llvm@20.1.7 -y || xlings install llvm -y
+          # latest-first: test binaries now link the toolchain's own libc++
+          # (A1 root fix in flags.cppm), so new llvm releases are
+          # self-consistent — this job is the proof for each new default.
+          xlings install llvm -y || xlings install llvm@20.1.7 -y
           # Verify clang++ is available
           LLVM_ROOT=$(find "$HOME/.xlings" -path "*/xpkgs/xim-x-llvm/*/bin/clang++" | head -1 | xargs dirname | xargs dirname)
           echo "LLVM_ROOT=$LLVM_ROOT"
@@ -286,11 +286,10 @@ jobs:
 
       - name: Configure dev mcpp sandbox to reuse xlings LLVM
         run: |
-          # Discover whatever LLVM version `xlings install llvm` provided —
-          # hardcoding it (20.1.7) broke the job the day xlings bumped its
-          # default to 22.1.8.
-          LLVM_PKG=$(ls -d "$HOME/.xlings/data/xpkgs/xim-x-llvm"/*/ 2>/dev/null | head -1)
-          LLVM_PKG="${LLVM_PKG%/}"
+          # Use EXACTLY the LLVM the install step resolved (env LLVM_ROOT) —
+          # a version-glob pick chose a stale cached 20.1.7 next to the
+          # freshly installed 22.1.8 and silently tested the wrong toolchain.
+          LLVM_PKG="$LLVM_ROOT"
           test -d "$LLVM_PKG"
           LLVM_VER=$(basename "$LLVM_PKG")
           echo "MCPP_LLVM_VER=$LLVM_VER" >> "$GITHUB_ENV"
@@ -338,6 +337,42 @@ jobs:
           MCPP=$(cd "$(dirname "$MCPP")" && pwd)/$(basename "$MCPP")
           "$MCPP" self config --mirror GLOBAL
           "$MCPP" test
+
+      - name: Forensics — test-binary link + load state (on failure)
+        if: failure()
+        run: |
+          BIN=$(find target -path "*/bin/test_manifest" | head -1)
+          echo "binary: $BIN"
+          [ -n "$BIN" ] || exit 0
+          echo "--- otool -L ---";  otool -L "$BIN" || true
+          echo "--- rpaths ---";    otool -l "$BIN" | grep -A2 LC_RPATH || true
+          echo "--- statically embedded libc++? ---"
+          nm "$BIN" 2>/dev/null | grep -cE "T __ZNSt3__1" || echo "0 (good: no libc++ code in binary)"
+          echo "--- direct run ---"
+          set +e
+          "$BIN" > run.out 2>&1
+          echo "exit=$?"
+          head -20 run.out
+          sleep 5
+          echo "--- newest crash report (termination) ---"
+          CR=$(ls -t "$HOME/Library/Logs/DiagnosticReports"/*.ips 2>/dev/null | head -1)
+          if [ -n "$CR" ]; then
+            python3 - "$CR" <<'PY'
+          import json, sys
+          lines = open(sys.argv[1]).read().splitlines()
+          meta = json.loads(lines[0]); body = json.loads("\n".join(lines[1:]))
+          print("proc:", meta.get("app_name"), "| exc:", body.get("exception", {}))
+          print("termination:", body.get("termination", {}))
+          t = [th for th in body.get("threads", []) if th.get("triggered")]
+          for fr in (t[0].get("frames", [])[:12] if t else []):
+              print("  ", fr.get("imageIndex"), fr.get("symbol", fr.get("imageOffset")))
+          imgs = body.get("usedImages", [])
+          for i, im in enumerate(imgs[:12]):
+              print("img", i, im.get("path"))
+          PY
+          else
+            echo "none"
+          fi
 
       - name: E2E suite
         # See ci-linux.yml — fail-fast on hung tests instead of burning the
