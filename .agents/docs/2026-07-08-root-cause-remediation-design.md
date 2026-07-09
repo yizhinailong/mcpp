@@ -193,8 +193,15 @@ defense-in-depth for the next regression of any kind.
 | R2 (A1) | TestBinary stdlib unification | ✅ PR #202 merged (6/6, 8 forensics-driven rounds): static -load_hidden for tests = distributable model; llvm 22.1.8 green; dynamic route falsified (dylib set upward-links system libc++) | ✅ |
 | R3 (A3) | staged+atomic git index acquisition + catalog self-heal | ✅ xlings PR #353 merged; artifact path already atomic since 0.4.62 — incidents were v0.4.44 pins, bumped in #343 | ✅ |
 | R4 (C.1) | toolchain-bump consumer smoke + xlings pin v0.4.62 | ✅ xim-pkgindex PR #343 merged | ✅ |
-| R5 (A2) | cross gcc 16 packaging → floor bump | ✅ packaged (build-cross/build-native workflows added, release 16.1.0 4 assets, smoke-tested); xim entry merged (#344); mcpp cross pin → 16.1.0. **R5b remains**: anchor stays until xim ships x86_64 musl gcc 16 (the x86_64-linux-musl release build is still on musl-gcc 15.1.0) | 🔄 |
-| R6 | mcpp 0.0.86 release + ecosystem closure (mirror / index bump / fresh-install) | all | pending |
+| R5 (A2) | gcc 16 everywhere; ANCHOR DELETED | ✅ COMPLETE. aarch64-linux-musl-gcc 16.1.0 + musl-gcc 16.1.0 packaged (builder workflows w/ hash-injection, kernel.org GNU_SITE, STRIP 850→104MB, import-std smoke, GitHub+GitCode via vendored gtc); xim entries #344/#345 merged (#345 = consumer-smoke gate's first live pass after 5 gate-fix rounds); mcpp: cross+native musl pins → 16 (#203/#204); force_template_instantiations() DELETED (#204) — local + CI musl/cross links green anchor-free, ELF notes GCC 16.1.0 | ✅ |
+| R6 | 0.0.86 shipped + ecosystem closed | ✅ 4-platform release; both mirrors 16/16 verified (after fixing the eager-delete verify bug the gate itself caught); index bump #346 merged; fresh-install 10/10 incl. the new wait-index gate | ✅ |
+
+Additional pipeline finding fixed during R6: the A4 verify loop's eager
+404→delete deleted freshly-uploaded assets during CDN propagation — the
+publish-ecosystem timeout (also A4) contained it; verify now waits ≤18s
+before concluding failure. Second finding: xlings-res builder repos had
+no GitCode publishing at all — vendored-gtc steps added to all three
+builder workflows (secret-gated), with local gtc as the fallback.
 
 ## Order of execution
 
