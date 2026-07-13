@@ -220,6 +220,43 @@ jobs:
           cd hello_win
           "$MCPP_SELF" run
 
+      # windows-latest ships VS 2022 Enterprise with the VC workload, so
+      # msvc@system detection MUST succeed here — a failure is a regression
+      # in the discovery/identification chain (vswhere → env → paths).
+      # Runs BEFORE the LLVM self-host rebuild: that step cleans + rebuilds
+      # target/, invalidating this job's $MCPP_SELF fingerprint path.
+      - name: "Toolchain: MSVC — detection & selection (msvc@system)"
+        shell: bash
+        run: |
+          export MCPP_VENDORED_XLINGS="$XLINGS_BIN"
+
+          # Neutral cwd: the repo root's mcpp.toml [toolchain] would shadow
+          # the global default in `toolchain list` / doctor output.
+          TMP=$(mktemp -d); cd "$TMP"
+
+          out=$("$MCPP_SELF" toolchain default msvc); echo "$out"
+          grep -q "Detected"     <<<"$out"
+          grep -q "msvc@system"  <<<"$out"
+
+          "$MCPP_SELF" toolchain list | tee tc-list.txt
+          grep -E '\*\s*msvc' tc-list.txt
+
+          "$MCPP_SELF" self doctor 2>&1 | tee doctor.txt || true
+          grep -qi "msvc" doctor.txt
+
+          # native cl.exe builds are gated with one owned message
+          "$MCPP_SELF" new hello_msvc && cd hello_msvc
+          set +e
+          bout=$("$MCPP_SELF" build 2>&1); brc=$?
+          set -e
+          echo "$bout"
+          test $brc -ne 0
+          grep -q "not yet supported" <<<"$bout"
+
+          # restore the LLVM default for the remaining steps
+          cd "$GITHUB_WORKSPACE"
+          "$MCPP_SELF" toolchain default llvm@20.1.7
+
       - name: "Toolchain: LLVM — build mcpp (self-host)"
         shell: bash
         run: |
