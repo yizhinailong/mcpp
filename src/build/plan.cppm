@@ -10,6 +10,7 @@ import mcpp.manifest;
 import mcpp.modgraph.graph;
 import mcpp.modgraph.scanner;
 import mcpp.toolchain.detect;
+import mcpp.toolchain.dialect;
 import mcpp.toolchain.fingerprint;
 import mcpp.platform;
 
@@ -47,6 +48,10 @@ struct BuildPlan {
     mcpp::toolchain::Fingerprint    fingerprint;
     std::string                     cppStandard = "c++23";
     std::string                     cppStandardFlag = "-std=c++23";
+    // Module-graph-global dialect flags (issue #210), pre-joined with a
+    // leading space per flag (e.g. " -freflection"). Rides -std='s channels:
+    // global $cxxflags (all TUs incl. deps), std BMI prebuild, scans.
+    std::string                     dialectFlags;
 
     std::filesystem::path           projectRoot;      // where mcpp.toml lives
     std::filesystem::path           outputDir;        // target/<triple>/<fp>/
@@ -125,10 +130,13 @@ std::string sanitize_for_path(std::string_view module_name) {
     return s;
 }
 
-std::string object_filename_for(const std::filesystem::path& src) {
+std::string object_filename_for(const std::filesystem::path& src,
+                                std::string_view objExt = ".o") {
     auto stem = src.stem().string();
     // distinguish .cppm vs .cpp by extension prefix to avoid collisions
-    return stem + (src.extension() == ".cppm" ? ".m.o" : ".o");
+    return stem + (src.extension() == ".cppm"
+                       ? ".m" + std::string(objExt)
+                       : std::string(objExt));
 }
 
 std::string qualified_package_name(const mcpp::manifest::Manifest& manifest) {
@@ -313,8 +321,16 @@ BuildPlan make_plan(const mcpp::manifest::Manifest&         manifest,
     plan.fingerprint      = fp;
     if (auto stdCfg = mcpp::manifest::normalize_cpp_standard(manifest.package.standard)) {
         plan.cppStandard = stdCfg->canonical;
-        plan.cppStandardFlag = stdCfg->flag;
+        // Spelled per-dialect: "-std=c++26" (gnu) vs "/std:c++latest" (msvc).
+        plan.cppStandardFlag = mcpp::toolchain::std_flag_for(
+            mcpp::toolchain::dialect_for(tc), stdCfg->canonical, stdCfg->level);
     }
+    for (auto& f : mcpp::manifest::dialect_flags(manifest.buildConfig)) {
+        plan.dialectFlags += ' ';
+        plan.dialectFlags += f;
+    }
+    // Object extension is dialect-spelled (.o vs .obj).
+    const std::string_view objExt = mcpp::toolchain::dialect_for(tc).objExt;
     plan.projectRoot     = projectRoot;
     plan.outputDir       = outputDir;
     plan.stdBmiPath     = stdBmiPath;
@@ -389,7 +405,7 @@ BuildPlan make_plan(const mcpp::manifest::Manifest&         manifest,
     //     derived from `<pkg>/<parent-dir>` so collisions are impossible.
     std::map<std::string, int> basenameCount;
     for (auto idx : topoOrder) {
-        basenameCount[object_filename_for(graph.units[idx].path)]++;
+        basenameCount[object_filename_for(graph.units[idx].path, objExt)]++;
     }
     auto sanitize = [](const std::string& s) {
         std::string out; out.reserve(s.size());
@@ -406,7 +422,7 @@ BuildPlan make_plan(const mcpp::manifest::Manifest&         manifest,
         cu.localIncludeDirs = u.localIncludeDirs;
         cu.packageCflags = u.packageCflags;
         cu.packageCxxflags = u.packageCxxflags;
-        const auto fname = object_filename_for(u.path);
+        const auto fname = object_filename_for(u.path, objExt);
         if (basenameCount[fname] > 1) {
             // Use <sanitized-pkg>/<parent-dir-name> as prefix to handle
             // both cross-package (multi-version mangling) and intra-package
@@ -650,7 +666,7 @@ BuildPlan make_plan(const mcpp::manifest::Manifest&         manifest,
             // Add main.cpp -> obj/main.o
             CompileUnit main_cu;
             main_cu.source = *lu.entryMain;
-            main_cu.object = std::filesystem::path("obj") / object_filename_for(*lu.entryMain);
+            main_cu.object = std::filesystem::path("obj") / object_filename_for(*lu.entryMain, objExt);
             main_cu.packageName = qualified_package_name(manifest);
             if (!packages.empty() && packages[0].usageResolved) {
                 main_cu.localIncludeDirs = packages[0].privateBuild.includeDirs;
