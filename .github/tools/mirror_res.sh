@@ -49,71 +49,96 @@ for a in "${ASSETS[@]}"; do
   gh release download "v$VER" -R "$SRC_REPO" -D "$DL" -p "$a" 2>/dev/null || { echo "[mirror] FAIL: missing $a in $SRC_REPO v$VER" >&2; exit 1; }
 done
 
-# ── GitHub (per-file timeout + verify + delete-and-reupload retry) ──
+# ── Probes ──────────────────────────────────────────────────────────
+# Wait-loop probe: a RANGED GET (first byte). It's a real object read — HEAD
+# lies on both hosts (gitcode returns a redirect stub; the 0.0.75/76 github
+# phantom assets HEAD'd fine) — but it doesn't download multi-MB assets on
+# every poll (the old full-GET probes against gitcode from a US runner were
+# minute-scale each and blew the job's 20min budget, v0.0.89 incident).
+# The final completeness gate below still does FULL GETs.
+probe() { # host_path asset → 0 iff the object serves bytes
+  local code
+  code=$(curl -fsSL -o /dev/null -w '%{http_code}' -r 0-0 -L "$1" 2>/dev/null)
+  [[ "$code" == 200 || "$code" == 206 ]]
+}
+
+# Wait for an asset to serve, with real propagation patience (fresh uploads
+# take ~20-60s to reach the download CDN). ~2min ceiling, 5s cadence.
+wait_asset() { # url → 0 iff 200/206 within the window
+  for _ in $(seq 1 24); do
+    probe "$1" && return 0
+    sleep 5
+  done
+  return 1
+}
+
+# ── GitHub ──────────────────────────────────────────────────────────
 # A4 hardening: `gh release upload` was observed both HANGING (>1h on one
-# asset, 2026-07-08) and leaving a phantom asset that later 404s. Treat GH
-# exactly like GitCode below: bounded upload, verify the actual download,
-# retry with a delete first (the observed bad state cleared on re-upload).
+# asset, 2026-07-08) and leaving a phantom asset that later 404s (0.0.75/76).
+# Shape (v0.0.89 lesson): upload ALL assets first, then verify with patience —
+# propagation overlaps instead of serializing per asset. NEVER delete on a
+# verify timeout: --clobber re-upload already replaces, and the eager
+# 404→delete loop repeatedly deleted GOOD uploads whose propagation was
+# merely slower than the wait window (0.0.86 incident, recurred at 18s in
+# v0.0.89 — 11 delete+reupload cycles across 8 assets).
 GH_ENABLED=0
 if [[ -n "${XLINGS_RES_TOKEN:-}" ]] || gh auth status >/dev/null 2>&1; then
   GH_ENABLED=1
   info "GitHub $GH_DST tag $VER"
   GH_TOKEN="${XLINGS_RES_TOKEN:-}" gh release view "$VER" -R "$GH_DST" >/dev/null 2>&1 \
     || GH_TOKEN="${XLINGS_RES_TOKEN:-}" gh release create "$VER" -R "$GH_DST" --title "$VER" --notes "$PROJ $VER (mirror of $SRC_REPO)"
-  for a in "${ASSETS[@]}"; do
-    # Idempotent re-runs (incident recovery) skip assets already serving 200.
-    if [[ "$(curl -fsSL -o /dev/null -w '%{http_code}' -L "https://github.com/${GH_DST}/releases/download/${VER}/${a}" 2>/dev/null)" == 200 ]]; then
-      info "gh $a already mirrored (200), skipping"
-      continue
-    fi
-    for try in 1 2 3 4 5; do
+  for try in 1 2 3; do
+    # Phase 1: upload everything not yet serving (idempotent re-runs skip).
+    pending=()
+    for a in "${ASSETS[@]}"; do
+      if probe "https://github.com/${GH_DST}/releases/download/${VER}/${a}"; then
+        [[ $try == 1 ]] && info "gh $a already mirrored, skipping"
+        continue
+      fi
+      pending+=("$a")
       GH_TOKEN="${XLINGS_RES_TOKEN:-}" timeout 300 gh release upload "$VER" "$DL/$a" -R "$GH_DST" --clobber || true
-      # Freshly uploaded assets take a few seconds to propagate to the
-      # download CDN. Verify with patience — an eager 404→delete loop
-      # DELETED successfully uploaded assets over and over (0.0.86
-      # incident). Only delete + retry after propagation clearly failed.
-      ok=""
-      for v in 1 2 3 4 5 6; do
-        sleep 3
-        if [[ "$(curl -fsSL -o /dev/null -w '%{http_code}' -L "https://github.com/${GH_DST}/releases/download/${VER}/${a}" 2>/dev/null)" == 200 ]]; then
-          ok=1; break
-        fi
-      done
-      [[ -n "$ok" ]] && break
-      echo "[mirror] gh $a still not 200 ~18s after upload (try $try); delete + reupload..."
-      GH_TOKEN="${XLINGS_RES_TOKEN:-}" gh release delete-asset "$VER" "$a" -R "$GH_DST" -y 2>/dev/null || true
-      sleep 4
     done
+    [[ ${#pending[@]} == 0 ]] && break
+    # Phase 2: verify the batch with propagation patience.
+    failed=()
+    for a in "${pending[@]}"; do
+      wait_asset "https://github.com/${GH_DST}/releases/download/${VER}/${a}" \
+        || failed+=("$a")
+    done
+    [[ ${#failed[@]} == 0 ]] && break
+    echo "[mirror] gh not serving after patience (try $try): ${failed[*]} — re-uploading (no delete)"
   done
 else
   info "no github auth; skipping github mirror"
 fi
 
-# ── GitCode (gtc, per-file retry — multi-file upload can 502 and drop files) ──
+# ── GitCode (gtc — multi-file upload can 502 and drop files) ─────────
+# Same two-phase shape. gtc can report errors on uploads that actually
+# succeeded (obs_callback flakiness) — the probe, not gtc's exit code, is
+# the source of truth.
 GTC_ENABLED=0
 if [[ -n "${GITCODE_TOKEN:-}" ]] && command -v gtc >/dev/null 2>&1; then
   GTC_ENABLED=1
   info "GitCode $GTC_DST tag $VER"
   gtc release create "$GTC_DST" --tag "$VER" --name "$VER" 2>/dev/null || true
-  # Upload then verify the actual DOWNLOAD is 200 (gtc can report success yet
-  # leave a phantom/missing asset — obs_callback flakiness), retry up to 5.
-  for a in "${ASSETS[@]}"; do
-    if [[ "$(curl -fsSL -o /dev/null -w '%{http_code}' -L "https://gitcode.com/${GTC_DST}/releases/download/${VER}/${a}" 2>/dev/null)" == 200 ]]; then
-      info "gtc $a already mirrored (200), skipping"
-      continue
-    fi
-    for try in 1 2 3 4 5; do
+  for try in 1 2 3; do
+    pending=()
+    for a in "${ASSETS[@]}"; do
+      if probe "https://gitcode.com/${GTC_DST}/releases/download/${VER}/${a}"; then
+        [[ $try == 1 ]] && info "gtc $a already mirrored, skipping"
+        continue
+      fi
+      pending+=("$a")
       timeout 300 gtc release upload "$GTC_DST" "$DL/$a" --tag "$VER" >/dev/null 2>&1 || true
-      ok=""
-      for v in 1 2 3 4 5 6; do
-        sleep 3
-        if [[ "$(curl -fsSL -o /dev/null -w '%{http_code}' -L "https://gitcode.com/${GTC_DST}/releases/download/${VER}/${a}" 2>/dev/null)" == 200 ]]; then
-          ok=1; break
-        fi
-      done
-      [[ -n "$ok" ]] && break
-      echo "[mirror] gtc $a not 200 after try $try, retrying..."; sleep 4
     done
+    [[ ${#pending[@]} == 0 ]] && break
+    failed=()
+    for a in "${pending[@]}"; do
+      wait_asset "https://gitcode.com/${GTC_DST}/releases/download/${VER}/${a}" \
+        || failed+=("$a")
+    done
+    [[ ${#failed[@]} == 0 ]] && break
+    echo "[mirror] gtc not serving after patience (try $try): ${failed[*]} — re-uploading"
   done
 else
   info "no GITCODE_TOKEN/gtc; skipping gitcode mirror"
