@@ -81,8 +81,14 @@ verify_batch() { # base_url asset... → prints assets still not serving
   return 0
 }
 
-# One host's mirror: upload everything not yet serving, then batch-verify
-# with propagation patience, up to 3 rounds.
+# One host's mirror: probe → SKIP whatever already serves → upload only the
+# missing, then batch-verify with propagation patience, up to 3 rounds.
+#
+# HARD RULE: this script issues NO delete operations, on either host.
+# (The gh `--clobber` below is an overwrite-upload that can only fire after
+# the download probe already said the asset is NOT serving — it can repair a
+# phantom record but can never touch a serving asset, which is skipped
+# before any upload is attempted.)
 #
 # Hard-won rules (0.0.86 / 0.0.89 / 0.0.90 postmortems):
 #  - NEVER delete on a verify timeout — the eager 404→delete loop repeatedly
