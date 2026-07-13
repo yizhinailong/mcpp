@@ -29,6 +29,14 @@ std::string std_module_build_command(const Toolchain& tc,
                                      std::string_view sysrootFlag,
                                      std::string_view cppStandardFlag);
 
+// Normalized backend surface: same shape as clang::std_module_build_commands
+// (a command sequence), so consumers don't branch on arity per compiler.
+std::vector<std::string> std_module_build_commands(
+    const Toolchain& tc,
+    const std::filesystem::path& cacheDir,
+    std::string_view sysrootFlag,
+    std::string_view cppStandardFlag);
+
 } // namespace mcpp::toolchain::gcc
 
 namespace mcpp::toolchain::gcc {
@@ -61,6 +69,21 @@ std::optional<std::filesystem::path> find_std_module_source(
     auto root = cxx_binary.parent_path().parent_path();
     auto p = root / "include" / "c++" / std::string(version) / "bits" / "std.cc";
     if (std::filesystem::exists(p)) return p;
+
+    // Version-dir scan fallback: the header dir doesn't always equal the
+    // full driver version (e.g. distro / MinGW-w64 builds using the major
+    // version, or a patched banner). Any bits/std.cc under include/c++ is
+    // this installation's — take the first.
+    {
+        std::error_code ec;
+        auto cxxInclude = root / "include" / "c++";
+        if (std::filesystem::exists(cxxInclude, ec)) {
+            for (auto& entry : std::filesystem::directory_iterator(cxxInclude, ec)) {
+                auto cand = entry.path() / "bits" / "std.cc";
+                if (std::filesystem::exists(cand, ec)) return cand;
+            }
+        }
+    }
 
     auto cmd = std::format("'{}' -print-file-name=libstdc++.so 2>/dev/null",
                            cxx_binary.string());
@@ -114,7 +137,7 @@ std::string std_module_build_command(const Toolchain& tc,
     std::string bFlag;
     if (!is_musl_target(tc)) {
         if (auto binutilsBin = find_binutils_bin(tc.binaryPath)) {
-            bFlag = std::format(" -B'{}'", binutilsBin->string());
+            bFlag = std::format(" -B{}", mcpp::xlings::shq(binutilsBin->string()));
         }
     }
 
@@ -127,6 +150,14 @@ std::string std_module_build_command(const Toolchain& tc,
         sysrootFlag,
         bFlag,
         mcpp::xlings::shq(tc.stdModuleSource.string()));
+}
+
+std::vector<std::string> std_module_build_commands(
+    const Toolchain& tc,
+    const std::filesystem::path& cacheDir,
+    std::string_view sysrootFlag,
+    std::string_view cppStandardFlag) {
+    return { std_module_build_command(tc, cacheDir, sysrootFlag, cppStandardFlag) };
 }
 
 } // namespace mcpp::toolchain::gcc
