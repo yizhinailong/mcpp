@@ -62,87 +62,95 @@ probe() { # host_path asset → 0 iff the object serves bytes
   [[ "$code" == 200 || "$code" == 206 ]]
 }
 
-# Wait for an asset to serve, with real propagation patience (fresh uploads
-# take ~20-60s to reach the download CDN). ~2min ceiling, 5s cadence.
-wait_asset() { # url → 0 iff 200/206 within the window
-  for _ in $(seq 1 24); do
-    probe "$1" && return 0
-    sleep 5
+# Shared-deadline batch verify: ONE ~2min propagation clock sweeps ALL
+# pending assets (per-asset serial 120s waits stacked up to 16min in the
+# v0.0.90 incident). Echoes the still-missing set; empty output = all good.
+verify_batch() { # base_url asset... → prints assets still not serving
+  local base="$1"; shift
+  local deadline=$((SECONDS + 150))
+  local pending=("$@")
+  while ((${#pending[@]})) && ((SECONDS < deadline)); do
+    local still=()
+    for a in "${pending[@]}"; do
+      probe "${base}/${a}" || still+=("$a")
+    done
+    pending=("${still[@]}")
+    ((${#pending[@]})) && sleep 5
   done
-  return 1
+  ((${#pending[@]})) && echo "${pending[*]}"
+  return 0
 }
 
-# ── GitHub ──────────────────────────────────────────────────────────
-# A4 hardening: `gh release upload` was observed both HANGING (>1h on one
-# asset, 2026-07-08) and leaving a phantom asset that later 404s (0.0.75/76).
-# Shape (v0.0.89 lesson): upload ALL assets first, then verify with patience —
-# propagation overlaps instead of serializing per asset. NEVER delete on a
-# verify timeout: --clobber re-upload already replaces, and the eager
-# 404→delete loop repeatedly deleted GOOD uploads whose propagation was
-# merely slower than the wait window (0.0.86 incident, recurred at 18s in
-# v0.0.89 — 11 delete+reupload cycles across 8 assets).
+# One host's mirror: upload everything not yet serving, then batch-verify
+# with propagation patience, up to 3 rounds.
+#
+# Hard-won rules (0.0.86 / 0.0.89 / 0.0.90 postmortems):
+#  - NEVER delete on a verify timeout — the eager 404→delete loop repeatedly
+#    deleted GOOD uploads whose propagation was merely slow.
+#  - NEVER kill a slow-but-progressing upload: the outer `timeout` MUST
+#    exceed gtc's inner PUT timeout (600s). v0.0.90 wrapped uploads in
+#    `timeout 300`, so every cross-border PUT >5min was SIGKILLed at 60%%
+#    and restarted from byte zero — the 20min job ceiling fell to this.
+#  - gtc's exit code lies both ways (obs_callback flakiness); the download
+#    probe is the only source of truth.
+mirror_host() { # kind(gh|gtc) base_url
+  local kind="$1" base="$2" try a
+  local pending failed
+  for try in 1 2 3; do
+    pending=()
+    for a in "${ASSETS[@]}"; do
+      if probe "${base}/${a}"; then
+        [[ $try == 1 ]] && info "$kind $a already mirrored, skipping"
+        continue
+      fi
+      pending+=("$a")
+      if [[ "$kind" == gh ]]; then
+        GH_TOKEN="${XLINGS_RES_TOKEN:-}" timeout 900 \
+          gh release upload "$VER" "$DL/$a" -R "$GH_DST" --clobber || true
+      else
+        timeout 900 gtc release upload "$GTC_DST" "$DL/$a" --tag "$VER" \
+          >/dev/null 2>&1 || true
+      fi
+    done
+    [[ ${#pending[@]} == 0 ]] && return 0
+    failed=$(verify_batch "$base" "${pending[@]}")
+    [[ -z "$failed" ]] && return 0
+    echo "[mirror] $kind not serving after patience (try $try): $failed — re-uploading (no delete)"
+  done
+  return 0  # the completeness gate below is the real pass/fail
+}
+
+# ── Both hosts IN PARALLEL: they are fully independent, and the gitcode
+# leg is cross-border-slow — serializing them doubled wall time for nothing.
 GH_ENABLED=0
 if [[ -n "${XLINGS_RES_TOKEN:-}" ]] || gh auth status >/dev/null 2>&1; then
   GH_ENABLED=1
   info "GitHub $GH_DST tag $VER"
   GH_TOKEN="${XLINGS_RES_TOKEN:-}" gh release view "$VER" -R "$GH_DST" >/dev/null 2>&1 \
     || GH_TOKEN="${XLINGS_RES_TOKEN:-}" gh release create "$VER" -R "$GH_DST" --title "$VER" --notes "$PROJ $VER (mirror of $SRC_REPO)"
-  for try in 1 2 3; do
-    # Phase 1: upload everything not yet serving (idempotent re-runs skip).
-    pending=()
-    for a in "${ASSETS[@]}"; do
-      if probe "https://github.com/${GH_DST}/releases/download/${VER}/${a}"; then
-        [[ $try == 1 ]] && info "gh $a already mirrored, skipping"
-        continue
-      fi
-      pending+=("$a")
-      GH_TOKEN="${XLINGS_RES_TOKEN:-}" timeout 300 gh release upload "$VER" "$DL/$a" -R "$GH_DST" --clobber || true
-    done
-    [[ ${#pending[@]} == 0 ]] && break
-    # Phase 2: verify the batch with propagation patience.
-    failed=()
-    for a in "${pending[@]}"; do
-      wait_asset "https://github.com/${GH_DST}/releases/download/${VER}/${a}" \
-        || failed+=("$a")
-    done
-    [[ ${#failed[@]} == 0 ]] && break
-    echo "[mirror] gh not serving after patience (try $try): ${failed[*]} — re-uploading (no delete)"
-  done
 else
   info "no github auth; skipping github mirror"
 fi
-
-# ── GitCode (gtc — multi-file upload can 502 and drop files) ─────────
-# Same two-phase shape. gtc can report errors on uploads that actually
-# succeeded (obs_callback flakiness) — the probe, not gtc's exit code, is
-# the source of truth.
 GTC_ENABLED=0
 if [[ -n "${GITCODE_TOKEN:-}" ]] && command -v gtc >/dev/null 2>&1; then
   GTC_ENABLED=1
   info "GitCode $GTC_DST tag $VER"
   gtc release create "$GTC_DST" --tag "$VER" --name "$VER" 2>/dev/null || true
-  for try in 1 2 3; do
-    pending=()
-    for a in "${ASSETS[@]}"; do
-      if probe "https://gitcode.com/${GTC_DST}/releases/download/${VER}/${a}"; then
-        [[ $try == 1 ]] && info "gtc $a already mirrored, skipping"
-        continue
-      fi
-      pending+=("$a")
-      timeout 300 gtc release upload "$GTC_DST" "$DL/$a" --tag "$VER" >/dev/null 2>&1 || true
-    done
-    [[ ${#pending[@]} == 0 ]] && break
-    failed=()
-    for a in "${pending[@]}"; do
-      wait_asset "https://gitcode.com/${GTC_DST}/releases/download/${VER}/${a}" \
-        || failed+=("$a")
-    done
-    [[ ${#failed[@]} == 0 ]] && break
-    echo "[mirror] gtc not serving after patience (try $try): ${failed[*]} — re-uploading"
-  done
 else
   info "no GITCODE_TOKEN/gtc; skipping gitcode mirror"
 fi
+
+GH_PID=""; GTC_PID=""
+if [[ "$GH_ENABLED" == 1 ]]; then
+  mirror_host gh  "https://github.com/${GH_DST}/releases/download/${VER}" &
+  GH_PID=$!
+fi
+if [[ "$GTC_ENABLED" == 1 ]]; then
+  mirror_host gtc "https://gitcode.com/${GTC_DST}/releases/download/${VER}" &
+  GTC_PID=$!
+fi
+[[ -n "$GH_PID"  ]] && wait "$GH_PID"
+[[ -n "$GTC_PID" ]] && wait "$GTC_PID"
 
 # ── Completeness gate: verify every asset on every ENABLED host ──
 # A4: this is the mirror's definition of done. The caller must treat a
